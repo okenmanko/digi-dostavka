@@ -1,0 +1,963 @@
+import { Telegraf, Markup } from "telegraf";
+import dotenv from "dotenv";
+import fs from "fs/promises";
+import path from "path";
+
+dotenv.config();
+
+type OrderStatus = "created" | "assembled" | "delivered" | "cancelled" | "scheduled";
+type OrderType = "normal" | "storage";
+type PaymentType = "paid" | "cash";
+type Currency = "USD" | "UZS";
+
+type Courier = {
+  id: number;
+  name: string;
+};
+
+type Warehouse = {
+  id: string;
+  name: string;
+};
+
+type OrderItem = {
+  name: string;
+  warehouseId: string;
+  warehouseName: string;
+};
+
+type Order = {
+  id: string;
+  type: OrderType;
+  clientName: string;
+  clientPhone: string;
+  address: string;
+  items: OrderItem[];
+  deliveryTime: string;
+  paymentType: PaymentType;
+  amount?: number;
+  currency?: Currency;
+  courierId: number;
+  courierName: string;
+  status: OrderStatus;
+  scheduledAt?: string;
+  deliveryGroupMessageId?: number;
+  deliveredPhotoFileId?: string;
+  createdBy: number;
+  createdAt: string;
+  assembledAt?: string;
+  deliveredAt?: string;
+  cancelledAt?: string;
+};
+
+type Draft = Partial<Order> & {
+  step?: string;
+  tempItemName?: string;
+};
+
+const TOKEN = process.env.BOT_TOKEN || "";
+if (!TOKEN) {
+  throw new Error("BOT_TOKEN topilmadi");
+}
+
+const bot = new Telegraf(TOKEN);
+
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+  .split(",")
+  .map((x) => Number(x.trim()))
+  .filter((x) => Number.isFinite(x) && x > 0);
+
+const DELIVERY_GROUP_ID = Number(process.env.DELIVERY_GROUP_ID);
+const REPORT_GROUP_ID = Number(process.env.REPORT_GROUP_ID);
+
+const COURIERS: Courier[] = (process.env.COURIERS || "")
+  .split(",")
+  .map((x) => {
+    const [idRaw, nameRaw] = x.split(":");
+    return {
+      id: Number((idRaw || "").trim()),
+      name: (nameRaw || "").trim()
+    };
+  })
+  .filter((x) => Number.isFinite(x.id) && x.id > 0 && x.name.length > 0);
+
+const DATA_DIR = path.join(process.cwd(), "data");
+const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
+const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
+
+const drafts = new Map<number, Draft>();
+const waitingPhoto = new Map<number, string>();
+const locks = new Set<string>();
+
+function isAdmin(id?: number): boolean {
+  return !!id && ADMIN_IDS.includes(id);
+}
+
+function isCourier(id?: number): boolean {
+  return !!id && COURIERS.some((x) => x.id === id);
+}
+
+async function readJson<T>(file: string, fallback: T): Promise<T> {
+  try {
+    const data = await fs.readFile(file, "utf-8");
+    return JSON.parse(data) as T;
+  } catch {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(file, JSON.stringify(fallback, null, 2), "utf-8");
+    return fallback;
+  }
+}
+
+async function writeJson<T>(file: string, data: T): Promise<void> {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(file, JSON.stringify(data, null, 2), "utf-8");
+}
+
+async function getOrders(): Promise<Order[]> {
+  return readJson<Order[]>(ORDERS_FILE, []);
+}
+
+async function saveOrders(orders: Order[]): Promise<void> {
+  return writeJson(ORDERS_FILE, orders);
+}
+
+async function getWarehouses(): Promise<Warehouse[]> {
+  return readJson<Warehouse[]>(WAREHOUSES_FILE, []);
+}
+
+async function saveWarehouses(warehouses: Warehouse[]): Promise<void> {
+  return writeJson(WAREHOUSES_FILE, warehouses);
+}
+
+function adminMenu() {
+  return Markup.keyboard([
+    ["➕ Zayavka yaratish"],
+    ["📦 Xraneniya"],
+    ["📋 Aktiv zayavkalar"],
+    ["🏬 Skladlar"],
+    ["📊 Otchetlar", "❌ Bekor qilinganlar"]
+  ]).resize();
+}
+
+function courierKeyboard() {
+  return Markup.inlineKeyboard(
+    COURIERS.map((x) => [Markup.button.callback("🚚 " + x.name, "courier:" + x.id)])
+  );
+}
+
+function paymentText(order: Partial<Order>): string {
+  if (order.paymentType === "paid") return "✅ To‘langan";
+  if (order.paymentType === "cash") return "💰 Pul olish kerak";
+  return "➖ Tanlanmagan";
+}
+
+function statusText(status?: OrderStatus): string {
+  if (status === "scheduled") return "📦 Xraneniya";
+  if (status === "created") return "🆕 Yangi";
+  if (status === "assembled") return "📦 Sobrano";
+  if (status === "delivered") return "✅ Dostavlena";
+  if (status === "cancelled") return "❌ Bekor qilingan";
+  return "📝 Draft";
+}
+
+function formatOrder(order: Partial<Order>): string {
+  const items = (order.items || [])
+    .map((x, i) => `   ${i + 1}) ${x.name}\n      🏬 ${x.warehouseName}`)
+    .join("\n\n");
+
+  const lines = [
+    "━━━━━━━━━━━━━━━━━━━━",
+    `📋 ZAYAVKA: ${order.id || "YANGI"}`,
+    `📌 Status: ${statusText(order.status)}`,
+    "━━━━━━━━━━━━━━━━━━━━",
+    "",
+    `👤 Klient: ${order.clientName || "-"}`,
+    `📞 Telefon: ${order.clientPhone || "-"}`,
+    "",
+    "📍 Manzil:",
+    order.address || "-",
+    "",
+    "🛒 Mahsulotlar:",
+    items || "   - Mahsulot yo‘q",
+    "",
+    `🕒 Yetkazish vaqti: ${order.deliveryTime || "-"}`,
+    `🚚 Dostavshik: ${order.courierName || "-"}`,
+    "",
+    `💳 To‘lov: ${paymentText(order)}`
+  ];
+
+  if (order.amount) {
+    lines.push(`💵 Summa: ${order.amount} ${order.currency || ""}`);
+  }
+
+  if (order.type === "storage") {
+    lines.push("");
+    lines.push("📦 XRANENIYA");
+    lines.push(`⏰ Chiqish vaqti: ${order.scheduledAt || "-"}`);
+  }
+
+  lines.push("");
+  lines.push("━━━━━━━━━━━━━━━━━━━━");
+
+  return lines.join("\n").trim();
+}
+
+function deliveryButtons(order: Order): any {
+  if (order.status === "created") {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback("📦 SOBRANO", "assemble:" + order.id)],
+      [Markup.button.callback("❌ BEKOR QILISH", "cancel_real:" + order.id)]
+    ]);
+  }
+
+  if (order.status === "assembled") {
+    return Markup.inlineKeyboard([
+      [Markup.button.callback("✅ DOSTAVLENA", "deliver:" + order.id)]
+    ]);
+  }
+
+  return undefined;
+}
+
+function parseScheduleInput(input: string): string {
+  const text = input.trim();
+  const direct = new Date(text.replace(" ", "T"));
+
+  if (!Number.isNaN(direct.getTime())) {
+    return direct.toISOString();
+  }
+
+  const lower = text.toLowerCase();
+  const now = new Date();
+
+  if (lower.includes("hafta")) {
+    now.setDate(now.getDate() + 7);
+    return now.toISOString();
+  }
+
+  if (lower.includes("oy")) {
+    now.setMonth(now.getMonth() + 1);
+    return now.toISOString();
+  }
+
+  now.setMinutes(now.getMinutes() + 1);
+  return now.toISOString();
+}
+
+async function showConfirm(ctx: any, draft: Draft) {
+  await ctx.reply(
+    formatOrder(draft),
+    Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Tasdiqlash", "confirm")],
+      [Markup.button.callback("✏️ Tahrirlash", "edit")],
+      [Markup.button.callback("❌ Bekor qilish", "cancel")]
+    ])
+  );
+}
+
+bot.start(async (ctx: any) => {
+  const userId = ctx.from?.id;
+
+  if (isAdmin(userId)) {
+    return ctx.reply("👨‍💼 Admin panel", adminMenu());
+  }
+
+  if (isCourier(userId)) {
+    return ctx.reply("🚚 Courier panel. Zayavkalar delivery guruhga keladi.");
+  }
+
+  return ctx.reply("⛔ Ruxsat yo‘q");
+});
+
+bot.command("id", async (ctx: any) => {
+  await ctx.reply("🆔 User ID: " + ctx.from.id + "\n💬 Chat ID: " + ctx.chat.id);
+});
+
+bot.hears("🏬 Skladlar", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const warehouses = await getWarehouses();
+  const text = warehouses.length
+    ? warehouses.map((x, i) => `${i + 1}. ${x.name}`).join("\n")
+    : "📭 Sklad yo‘q";
+
+  await ctx.reply(
+    text,
+    Markup.inlineKeyboard([[Markup.button.callback("➕ Sklad qo‘shish", "add_warehouse")]])
+  );
+});
+
+bot.action("add_warehouse", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  drafts.set(ctx.from.id, { step: "warehouse_name" });
+  await ctx.answerCbQuery();
+  await ctx.reply("🏬 Sklad nomini kiriting");
+});
+
+bot.hears("➕ Zayavka yaratish", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  drafts.set(ctx.from.id, {
+    type: "normal",
+    items: [],
+    step: "client_name"
+  });
+
+  await ctx.reply("👤 Klient ismi");
+});
+
+bot.hears("📦 Xraneniya", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  drafts.set(ctx.from.id, {
+    type: "storage",
+    items: [],
+    step: "client_name"
+  });
+
+  await ctx.reply("👤 Klient ismi");
+});
+
+bot.hears("📋 Aktiv zayavkalar", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const orders = await getOrders();
+  const active = orders.filter(
+    (x) => x.status === "created" || x.status === "assembled" || x.status === "scheduled"
+  );
+
+  if (!active.length) {
+    return ctx.reply("📭 Aktiv zayavka yo‘q");
+  }
+
+  for (const order of active.slice(-10)) {
+    await ctx.reply(formatOrder(order));
+  }
+});
+
+bot.hears("❌ Bekor qilinganlar", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const orders = await getOrders();
+  const cancelled = orders.filter((x) => x.status === "cancelled").slice(-10);
+
+  if (!cancelled.length) {
+    return ctx.reply("📭 Bekor qilingan zayavka yo‘q");
+  }
+
+  for (const order of cancelled) {
+    await ctx.reply(formatOrder(order));
+  }
+});
+
+bot.hears("📊 Otchetlar", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const orders = await getOrders();
+  const today = new Date().toISOString().slice(0, 10);
+  const todayOrders = orders.filter((x) => x.createdAt?.slice(0, 10) === today);
+
+  const created = todayOrders.filter((x) => x.status === "created").length;
+  const assembled = todayOrders.filter((x) => x.status === "assembled").length;
+  const delivered = todayOrders.filter((x) => x.status === "delivered").length;
+  const scheduled = todayOrders.filter((x) => x.status === "scheduled").length;
+  const cancelled = todayOrders.filter((x) => x.status === "cancelled").length;
+  const itemCount = todayOrders.reduce((sum, x) => sum + (x.items?.length || 0), 0);
+
+  await ctx.reply([
+    "📊 BUGUNGI OTCHET",
+    "━━━━━━━━━━━━━━━━━━━━",
+    "📋 Jami zayavka: " + todayOrders.length,
+    "🛒 Tovar soni: " + itemCount,
+    "",
+    "🆕 Yangi: " + created,
+    "📦 Sobrano: " + assembled,
+    "✅ Yetkazilgan: " + delivered,
+    "📦 Xraneniya: " + scheduled,
+    "❌ Bekor: " + cancelled,
+    "━━━━━━━━━━━━━━━━━━━━"
+  ].join("\n"));
+});
+
+bot.on("text", async (ctx: any) => {
+  const userId = ctx.from.id;
+  if (!isAdmin(userId)) return;
+
+  const draft = drafts.get(userId);
+  if (!draft?.step) return;
+
+  const text = ctx.message.text.trim();
+
+  if (draft.step === "warehouse_name") {
+    const warehouses = await getWarehouses();
+    warehouses.push({ id: Date.now().toString(), name: text });
+    await saveWarehouses(warehouses);
+    drafts.delete(userId);
+    return ctx.reply("✅ Sklad qo‘shildi", adminMenu());
+  }
+
+  if (draft.step === "client_name") {
+    draft.clientName = text;
+    draft.step = "client_phone";
+    drafts.set(userId, draft);
+    return ctx.reply("📞 Telefon raqam");
+  }
+
+  if (draft.step === "client_phone") {
+    draft.clientPhone = text;
+    draft.step = "address";
+    drafts.set(userId, draft);
+    return ctx.reply("📍 Manzil");
+  }
+
+  if (draft.step === "address") {
+    draft.address = text;
+    draft.step = "item_name";
+    drafts.set(userId, draft);
+    return ctx.reply("🛒 Mahsulot nomi");
+  }
+
+  if (draft.step === "item_name") {
+    draft.tempItemName = text;
+    const warehouses = await getWarehouses();
+
+    if (!warehouses.length) {
+      return ctx.reply("Avval sklad qo‘shing: 🏬 Skladlar");
+    }
+
+    draft.step = "item_warehouse";
+    drafts.set(userId, draft);
+
+    return ctx.reply(
+      "🏬 Qaysi skladdan olinadi?",
+      Markup.inlineKeyboard(warehouses.map((x) => [Markup.button.callback(x.name, "warehouse:" + x.id)]))
+    );
+  }
+
+  if (draft.step === "delivery_time") {
+    draft.deliveryTime = text;
+    draft.step = "payment";
+    drafts.set(userId, draft);
+
+    return ctx.reply(
+      "💳 To‘lov turini tanlang",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("✅ To‘langan", "payment:paid")],
+        [Markup.button.callback("💰 Pul olish kerak", "payment:cash")]
+      ])
+    );
+  }
+
+  if (draft.step === "amount") {
+    const amount = Number(text.replace(/\s/g, "").replace(",", "."));
+
+    if (!Number.isFinite(amount)) {
+      return ctx.reply("Summa faqat raqam bo‘lishi kerak");
+    }
+
+    draft.amount = amount;
+    draft.step = "currency";
+    drafts.set(userId, draft);
+
+    return ctx.reply(
+      "💱 Valyutani tanlang",
+      Markup.inlineKeyboard([[
+        Markup.button.callback("USD", "currency:USD"),
+        Markup.button.callback("UZS", "currency:UZS")
+      ]])
+    );
+  }
+
+  if (draft.step === "scheduled_at") {
+    draft.scheduledAt = parseScheduleInput(text);
+    draft.step = "confirm";
+    drafts.set(userId, draft);
+    return showConfirm(ctx, draft);
+  }
+
+  if (draft.step === "edit_client_name") {
+    draft.clientName = text;
+    draft.step = "confirm";
+    drafts.set(userId, draft);
+    return showConfirm(ctx, draft);
+  }
+
+  if (draft.step === "edit_client_phone") {
+    draft.clientPhone = text;
+    draft.step = "confirm";
+    drafts.set(userId, draft);
+    return showConfirm(ctx, draft);
+  }
+
+  if (draft.step === "edit_address") {
+    draft.address = text;
+    draft.step = "confirm";
+    drafts.set(userId, draft);
+    return showConfirm(ctx, draft);
+  }
+
+  if (draft.step === "edit_delivery_time") {
+    draft.deliveryTime = text;
+    draft.step = "confirm";
+    drafts.set(userId, draft);
+    return showConfirm(ctx, draft);
+  }
+});
+
+bot.action(/^warehouse:(.+)$/, async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  const warehouses = await getWarehouses();
+  const warehouse = warehouses.find((x) => x.id === ctx.match[1]);
+
+  if (!warehouse || !draft.tempItemName) {
+    await ctx.answerCbQuery("Xatolik");
+    return;
+  }
+
+  draft.items = draft.items || [];
+  draft.items.push({
+    name: draft.tempItemName,
+    warehouseId: warehouse.id,
+    warehouseName: warehouse.name
+  });
+
+  draft.tempItemName = undefined;
+  draft.step = "add_more";
+  drafts.set(ctx.from.id, draft);
+
+  await ctx.answerCbQuery();
+
+  return ctx.reply(
+    "➕ Yana mahsulot qo‘shasizmi?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Ha", "add_more")],
+      [Markup.button.callback("➡️ Davom etish", "finish_items")]
+    ])
+  );
+});
+
+bot.action("add_more", async (ctx: any) => {
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  draft.step = "item_name";
+  drafts.set(ctx.from.id, draft);
+
+  await ctx.answerCbQuery();
+  await ctx.reply("🛒 Mahsulot nomi");
+});
+
+bot.action("finish_items", async (ctx: any) => {
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  draft.step = "delivery_time";
+  drafts.set(ctx.from.id, draft);
+
+  await ctx.answerCbQuery();
+  await ctx.reply("🕒 Yetkazish vaqti. Masalan: 18:00");
+});
+
+bot.action(/^payment:(.+)$/, async (ctx: any) => {
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  const type = ctx.match[1];
+
+  if (type === "paid") {
+    draft.paymentType = "paid";
+    draft.amount = undefined;
+    draft.currency = undefined;
+    draft.step = "courier";
+    drafts.set(ctx.from.id, draft);
+
+    await ctx.answerCbQuery();
+    return ctx.reply("🚚 Dostavshik tanlang", courierKeyboard());
+  }
+
+  draft.paymentType = "cash";
+  draft.step = "amount";
+  drafts.set(ctx.from.id, draft);
+
+  await ctx.answerCbQuery();
+  return ctx.reply("💰 Qancha pul olish kerak?");
+});
+
+bot.action(/^currency:(USD|UZS)$/, async (ctx: any) => {
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  draft.currency = ctx.match[1] as Currency;
+  draft.step = "courier";
+  drafts.set(ctx.from.id, draft);
+
+  await ctx.answerCbQuery();
+  return ctx.reply("🚚 Dostavshik tanlang", courierKeyboard());
+});
+
+bot.action(/^courier:(.+)$/, async (ctx: any) => {
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  const courier = COURIERS.find((x) => x.id === Number(ctx.match[1]));
+
+  if (!courier) {
+    await ctx.answerCbQuery("Dostavshik topilmadi");
+    return;
+  }
+
+  draft.courierId = courier.id;
+  draft.courierName = courier.name;
+
+  if (draft.type === "storage") {
+    draft.step = "scheduled_at";
+    drafts.set(ctx.from.id, draft);
+    await ctx.answerCbQuery();
+    return ctx.reply("📦 Xraneniya uchun sana/vaqt kiriting. Masalan: 2026-06-01 18:00 yoki 1 hafta");
+  }
+
+  draft.step = "confirm";
+  drafts.set(ctx.from.id, draft);
+  await ctx.answerCbQuery();
+  return showConfirm(ctx, draft);
+});
+
+bot.action("edit", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  await ctx.answerCbQuery();
+
+  await ctx.reply(
+    "✏️ Nimani tahrirlaymiz?",
+    Markup.inlineKeyboard([
+      [Markup.button.callback("👤 Klient ismi", "edit:client_name")],
+      [Markup.button.callback("📞 Telefon", "edit:client_phone")],
+      [Markup.button.callback("📍 Manzil", "edit:address")],
+      [Markup.button.callback("🛒 Tovarlarni qayta kiritish", "edit:items")],
+      [Markup.button.callback("🕒 Vaqt", "edit:delivery_time")],
+      [Markup.button.callback("💳 To‘lov", "edit:payment")],
+      [Markup.button.callback("🚚 Dostavshik", "edit:courier")]
+    ])
+  );
+});
+
+bot.action(/^edit:(.+)$/, async (ctx: any) => {
+  const draft = drafts.get(ctx.from.id);
+  if (!draft) return;
+
+  const field = ctx.match[1];
+  await ctx.answerCbQuery();
+
+  if (field === "client_name") {
+    draft.step = "edit_client_name";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply("👤 Yangi klient ismini yozing");
+  }
+
+  if (field === "client_phone") {
+    draft.step = "edit_client_phone";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply("📞 Yangi telefon yozing");
+  }
+
+  if (field === "address") {
+    draft.step = "edit_address";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply("📍 Yangi manzil yozing");
+  }
+
+  if (field === "items") {
+    draft.items = [];
+    draft.step = "item_name";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply("🛒 Mahsulotlarni boshidan kiriting");
+  }
+
+  if (field === "delivery_time") {
+    draft.step = "edit_delivery_time";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply("🕒 Yangi vaqt yozing");
+  }
+
+  if (field === "payment") {
+    draft.step = "payment";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply(
+      "💳 To‘lov turini tanlang",
+      Markup.inlineKeyboard([
+        [Markup.button.callback("✅ To‘langan", "payment:paid")],
+        [Markup.button.callback("💰 Pul olish kerak", "payment:cash")]
+      ])
+    );
+  }
+
+  if (field === "courier") {
+    draft.step = "courier";
+    drafts.set(ctx.from.id, draft);
+    return ctx.reply("🚚 Dostavshik tanlang", courierKeyboard());
+  }
+});
+
+bot.action("cancel", async (ctx: any) => {
+  drafts.delete(ctx.from.id);
+  await ctx.answerCbQuery();
+  await ctx.reply("❌ Bekor qilindi", adminMenu());
+});
+
+bot.action("confirm", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const draft = drafts.get(ctx.from.id);
+
+  if (!draft) {
+    await ctx.answerCbQuery("Draft topilmadi");
+    return;
+  }
+
+  const order: Order = {
+    id: "ORD-" + Date.now(),
+    type: (draft.type || "normal") as OrderType,
+    clientName: draft.clientName || "",
+    clientPhone: draft.clientPhone || "",
+    address: draft.address || "",
+    items: draft.items || [],
+    deliveryTime: draft.deliveryTime || "",
+    paymentType: (draft.paymentType || "paid") as PaymentType,
+    amount: draft.amount,
+    currency: draft.currency,
+    courierId: draft.courierId || 0,
+    courierName: draft.courierName || "",
+    status: draft.type === "storage" ? "scheduled" : "created",
+    scheduledAt: draft.scheduledAt,
+    createdBy: ctx.from.id,
+    createdAt: new Date().toISOString()
+  };
+
+  const orders = await getOrders();
+
+  if (order.type === "normal") {
+    const msg = await bot.telegram.sendMessage(
+      DELIVERY_GROUP_ID,
+      formatOrder(order),
+      deliveryButtons(order)
+    );
+    order.deliveryGroupMessageId = msg.message_id;
+  }
+
+  orders.push(order);
+  await saveOrders(orders);
+  drafts.delete(ctx.from.id);
+
+  await ctx.answerCbQuery();
+  await ctx.reply("✅ Zayavka saqlandi", adminMenu());
+});
+
+bot.action(/^assemble:(.+)$/, async (ctx: any) => {
+  const orderId = ctx.match[1];
+
+  if (locks.has(orderId)) return;
+  locks.add(orderId);
+
+  try {
+    const orders = await getOrders();
+    const order = orders.find((x) => x.id === orderId);
+
+    if (!order) {
+      await ctx.answerCbQuery("Zayavka topilmadi");
+      return;
+    }
+
+    if (!isAdmin(ctx.from.id) && order.courierId !== ctx.from.id) {
+      await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
+      return;
+    }
+
+    if (order.status !== "created") {
+      await ctx.answerCbQuery("Bu statusni o‘zgartirib bo‘lmaydi");
+      return;
+    }
+
+    order.status = "assembled";
+    order.assembledAt = new Date().toISOString();
+    await saveOrders(orders);
+
+    if (order.deliveryGroupMessageId) {
+      await bot.telegram.editMessageText(
+        DELIVERY_GROUP_ID,
+        order.deliveryGroupMessageId,
+        undefined,
+        formatOrder(order),
+        deliveryButtons(order) as any
+      );
+    }
+
+    await ctx.answerCbQuery("📦 SOBRANO");
+  } finally {
+    locks.delete(orderId);
+  }
+});
+
+bot.action(/^deliver:(.+)$/, async (ctx: any) => {
+  const orderId = ctx.match[1];
+  const orders = await getOrders();
+  const order = orders.find((x) => x.id === orderId);
+
+  if (!order) {
+    await ctx.answerCbQuery("Zayavka topilmadi");
+    return;
+  }
+
+  if (!isAdmin(ctx.from.id) && order.courierId !== ctx.from.id) {
+    await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
+    return;
+  }
+
+  if (order.status !== "assembled") {
+    await ctx.answerCbQuery("Avval SOBRANO bosilishi kerak");
+    return;
+  }
+
+  waitingPhoto.set(ctx.from.id, orderId);
+  await ctx.answerCbQuery();
+  await ctx.reply("📸 Yetkazilganini tasdiqlash uchun rasm yuboring");
+});
+
+bot.on("photo", async (ctx: any) => {
+  const orderId = waitingPhoto.get(ctx.from.id);
+  if (!orderId) return;
+
+  if (locks.has(orderId)) return;
+  locks.add(orderId);
+
+  try {
+    const orders = await getOrders();
+    const order = orders.find((x) => x.id === orderId);
+
+    if (!order) {
+      await ctx.reply("Zayavka topilmadi");
+      return;
+    }
+
+    const photos = ctx.message.photo;
+    const photo = photos[photos.length - 1];
+
+    order.status = "delivered";
+    order.deliveredAt = new Date().toISOString();
+    order.deliveredPhotoFileId = photo.file_id;
+
+    await saveOrders(orders);
+    waitingPhoto.delete(ctx.from.id);
+
+    if (order.deliveryGroupMessageId) {
+      await bot.telegram.editMessageText(
+        DELIVERY_GROUP_ID,
+        order.deliveryGroupMessageId,
+        undefined,
+        formatOrder(order)
+      );
+    }
+
+    await bot.telegram.sendPhoto(REPORT_GROUP_ID, photo.file_id, {
+      caption: [
+        "✅ YETKAZILDI",
+        "",
+        formatOrder(order),
+        "",
+        "🕒 Yetkazilgan vaqt:",
+        new Date().toLocaleString("ru-RU")
+      ].join("\n")
+    });
+
+    await ctx.reply("✅ Yetkazildi va otchet yuborildi");
+  } finally {
+    locks.delete(orderId);
+  }
+});
+
+bot.action(/^cancel_real:(.+)$/, async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) {
+    await ctx.answerCbQuery("Faqat admin bekor qila oladi");
+    return;
+  }
+
+  const orderId = ctx.match[1];
+  const orders = await getOrders();
+  const order = orders.find((x) => x.id === orderId);
+
+  if (!order) {
+    await ctx.answerCbQuery("Zayavka topilmadi");
+    return;
+  }
+
+  if (order.status === "delivered") {
+    await ctx.answerCbQuery("Yetkazilgan zayavkani bekor qilib bo‘lmaydi");
+    return;
+  }
+
+  order.status = "cancelled";
+  order.cancelledAt = new Date().toISOString();
+  await saveOrders(orders);
+
+  if (order.deliveryGroupMessageId) {
+    await bot.telegram.editMessageText(
+      DELIVERY_GROUP_ID,
+      order.deliveryGroupMessageId,
+      undefined,
+      formatOrder(order)
+    );
+  }
+
+  await ctx.answerCbQuery("❌ Bekor qilindi");
+});
+
+setInterval(async () => {
+  const orders = await getOrders();
+  const now = Date.now();
+  let changed = false;
+
+  for (const order of orders) {
+    if (order.type !== "storage") continue;
+    if (order.status !== "scheduled") continue;
+    if (!order.scheduledAt) continue;
+
+    const time = new Date(order.scheduledAt).getTime();
+    if (!Number.isFinite(time)) continue;
+    if (time > now) continue;
+
+    order.status = "created";
+
+    const msg = await bot.telegram.sendMessage(
+      DELIVERY_GROUP_ID,
+      "📦 XRANENIYADAN CHIQDI\n\n" + formatOrder(order),
+      deliveryButtons(order)
+    );
+
+    order.deliveryGroupMessageId = msg.message_id;
+    changed = true;
+  }
+
+  if (changed) {
+    await saveOrders(orders);
+  }
+}, 60000);
+
+bot.catch((err) => {
+  console.error("BOT ERROR:", err);
+});
+
+bot.launch();
+
+console.log("Digi Dostavka running");
+
+process.once("SIGINT", () => {
+  bot.stop("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  bot.stop("SIGTERM");
+});

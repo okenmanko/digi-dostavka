@@ -1,0 +1,20 @@
+{
+  "name": "digi-dostavka",
+  "version": "1.0.0",
+  "description": "Digi Dostavka Telegram bot",
+  "main": "src/bot.ts",
+  "scripts": {
+    "dev": "ts-node src/bot.ts",
+    "build": "tsc",
+    "start": "node dist/bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}
