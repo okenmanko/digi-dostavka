@@ -88,7 +88,7 @@ const DEFAULT_COURIER_ID = Number(process.env.MOYSKLAD_DEFAULT_COURIER_ID || COU
 const DEFAULT_COURIER = COURIERS.find((x) => x.id === DEFAULT_COURIER_ID) || COURIERS[0];
 
 const MOYSKLAD_TOKEN = process.env.MOYSKLAD_TOKEN || "";
-const MOYSKLAD_BASE = "https://online.moysklad.ru/api/remap/1.2";
+const MOYSKLAD_BASE = "https://api.moysklad.ru/api/remap/1.2";
 const MOYSKLAD_DELIVERY_STATE_NAME = process.env.MOYSKLAD_DELIVERY_STATE_NAME || "доставка";
 const MOYSKLAD_DELIVERED_STATE_NAME = process.env.MOYSKLAD_DELIVERED_STATE_NAME || "Доставлен";
 const MOYSKLAD_SYNC_INTERVAL_SECONDS = Number(process.env.MOYSKLAD_SYNC_INTERVAL_SECONDS || 60);
