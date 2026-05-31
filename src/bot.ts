@@ -56,9 +56,7 @@ type Draft = Partial<Order> & {
 };
 
 const TOKEN = process.env.BOT_TOKEN || "";
-if (!TOKEN) {
-  throw new Error("BOT_TOKEN topilmadi");
-}
+if (!TOKEN) throw new Error("BOT_TOKEN topilmadi");
 
 const bot = new Telegraf(TOKEN);
 
@@ -88,6 +86,20 @@ const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
 const drafts = new Map<number, Draft>();
 const waitingPhoto = new Map<number, string>();
 const locks = new Set<string>();
+
+function htmlOptions(extra?: any): any {
+  return {
+    parse_mode: "HTML",
+    ...(extra || {})
+  };
+}
+
+function escapeHtml(text: string): string {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 function isAdmin(id?: number): boolean {
   return !!id && ADMIN_IDS.includes(id);
@@ -160,28 +172,41 @@ function statusText(status?: OrderStatus): string {
   return "📝 Draft";
 }
 
-function formatOrder(order: Partial<Order>): string {
-  const items = (order.items || [])
-    .map((x, i) => `   ${i + 1}) ${x.name}\n      🏬 ${x.warehouseName}`)
-    .join("\n\n");
+function formatItems(items: OrderItem[] = []): string {
+  if (!items.length) return "Mahsulot yo‘q";
 
+  const groups = new Map<string, string[]>();
+
+  for (const item of items) {
+    const sklad = item.warehouseName || "-";
+    if (!groups.has(sklad)) groups.set(sklad, []);
+    groups.get(sklad)!.push(`<b>${escapeHtml(item.name.toUpperCase())}</b>`);
+  }
+
+  return Array.from(groups.entries())
+    .map(([sklad, names]) => `${names.join("\n")}\n\n Sklad: ${escapeHtml(sklad)}`)
+    .join("\n\n");
+}
+
+function formatOrder(order: Partial<Order>): string {
   const lines = [
     "━━━━━━━━━━━━━━━━━━━━",
-    `📋 ZAYAVKA: ${order.id || "YANGI"}`,
+    `📋 ZAYAVKA: ${escapeHtml(order.id || "YANGI")}`,
     `📌 Status: ${statusText(order.status)}`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
-    `👤 Klient: ${order.clientName || "-"}`,
-    `📞 Telefon: ${order.clientPhone || "-"}`,
+    `👤 Klient: ${escapeHtml(order.clientName || "-")}`,
+    `📞 Telefon: ${escapeHtml(order.clientPhone || "-")}`,
     "",
     "📍 Manzil:",
-    order.address || "-",
+    escapeHtml(order.address || "-"),
     "",
     "🛒 Mahsulotlar:",
-    items || "   - Mahsulot yo‘q",
     "",
-    `🕒 Yetkazish vaqti: ${order.deliveryTime || "-"}`,
-    `🚚 Dostavshik: ${order.courierName || "-"}`,
+    formatItems(order.items || []),
+    "",
+    `🕒 Yetkazish vaqti: ${escapeHtml(order.deliveryTime || "-")}`,
+    `🚚 Dostavshik: ${escapeHtml(order.courierName || "-")}`,
     "",
     `💳 To‘lov: ${paymentText(order)}`
   ];
@@ -193,7 +218,7 @@ function formatOrder(order: Partial<Order>): string {
   if (order.type === "storage") {
     lines.push("");
     lines.push("📦 XRANENIYA");
-    lines.push(`⏰ Chiqish vaqti: ${order.scheduledAt || "-"}`);
+    lines.push(`⏰ Chiqish vaqti: ${escapeHtml(order.scheduledAt || "-")}`);
   }
 
   lines.push("");
@@ -223,9 +248,7 @@ function parseScheduleInput(input: string): string {
   const text = input.trim();
   const direct = new Date(text.replace(" ", "T"));
 
-  if (!Number.isNaN(direct.getTime())) {
-    return direct.toISOString();
-  }
+  if (!Number.isNaN(direct.getTime())) return direct.toISOString();
 
   const lower = text.toLowerCase();
   const now = new Date();
@@ -247,11 +270,13 @@ function parseScheduleInput(input: string): string {
 async function showConfirm(ctx: any, draft: Draft) {
   await ctx.reply(
     formatOrder(draft),
-    Markup.inlineKeyboard([
-      [Markup.button.callback("✅ Tasdiqlash", "confirm")],
-      [Markup.button.callback("✏️ Tahrirlash", "edit")],
-      [Markup.button.callback("❌ Bekor qilish", "cancel")]
-    ])
+    htmlOptions(
+      Markup.inlineKeyboard([
+        [Markup.button.callback("✅ Tasdiqlash", "confirm")],
+        [Markup.button.callback("✏️ Tahrirlash", "edit")],
+        [Markup.button.callback("❌ Bekor qilish", "cancel")]
+      ])
+    )
   );
 }
 
@@ -327,12 +352,10 @@ bot.hears("📋 Aktiv zayavkalar", async (ctx: any) => {
     (x) => x.status === "created" || x.status === "assembled" || x.status === "scheduled"
   );
 
-  if (!active.length) {
-    return ctx.reply("📭 Aktiv zayavka yo‘q");
-  }
+  if (!active.length) return ctx.reply("📭 Aktiv zayavka yo‘q");
 
   for (const order of active.slice(-10)) {
-    await ctx.reply(formatOrder(order));
+    await ctx.reply(formatOrder(order), htmlOptions());
   }
 });
 
@@ -342,12 +365,10 @@ bot.hears("❌ Bekor qilinganlar", async (ctx: any) => {
   const orders = await getOrders();
   const cancelled = orders.filter((x) => x.status === "cancelled").slice(-10);
 
-  if (!cancelled.length) {
-    return ctx.reply("📭 Bekor qilingan zayavka yo‘q");
-  }
+  if (!cancelled.length) return ctx.reply("📭 Bekor qilingan zayavka yo‘q");
 
   for (const order of cancelled) {
-    await ctx.reply(formatOrder(order));
+    await ctx.reply(formatOrder(order), htmlOptions());
   }
 });
 
@@ -422,9 +443,7 @@ bot.on("text", async (ctx: any) => {
     draft.tempItemName = text;
     const warehouses = await getWarehouses();
 
-    if (!warehouses.length) {
-      return ctx.reply("Avval sklad qo‘shing: 🏬 Skladlar");
-    }
+    if (!warehouses.length) return ctx.reply("Avval sklad qo‘shing: 🏬 Skladlar");
 
     draft.step = "item_warehouse";
     drafts.set(userId, draft);
@@ -452,9 +471,7 @@ bot.on("text", async (ctx: any) => {
   if (draft.step === "amount") {
     const amount = Number(text.replace(/\s/g, "").replace(",", "."));
 
-    if (!Number.isFinite(amount)) {
-      return ctx.reply("Summa faqat raqam bo‘lishi kerak");
-    }
+    if (!Number.isFinite(amount)) return ctx.reply("Summa faqat raqam bo‘lishi kerak");
 
     draft.amount = amount;
     draft.step = "currency";
@@ -744,8 +761,9 @@ bot.action("confirm", async (ctx: any) => {
     const msg = await bot.telegram.sendMessage(
       DELIVERY_GROUP_ID,
       formatOrder(order),
-      deliveryButtons(order)
+      htmlOptions(deliveryButtons(order))
     );
+
     order.deliveryGroupMessageId = msg.message_id;
   }
 
@@ -792,7 +810,7 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
         order.deliveryGroupMessageId,
         undefined,
         formatOrder(order),
-        deliveryButtons(order) as any
+        htmlOptions(deliveryButtons(order))
       );
     }
 
@@ -858,18 +876,20 @@ bot.on("photo", async (ctx: any) => {
         DELIVERY_GROUP_ID,
         order.deliveryGroupMessageId,
         undefined,
-        formatOrder(order)
+        formatOrder(order),
+        htmlOptions()
       );
     }
 
     await bot.telegram.sendPhoto(REPORT_GROUP_ID, photo.file_id, {
+      parse_mode: "HTML",
       caption: [
         "✅ YETKAZILDI",
         "",
         formatOrder(order),
         "",
         "🕒 Yetkazilgan vaqt:",
-        new Date().toLocaleString("ru-RU")
+        escapeHtml(new Date().toLocaleString("ru-RU"))
       ].join("\n")
     });
 
@@ -908,7 +928,8 @@ bot.action(/^cancel_real:(.+)$/, async (ctx: any) => {
       DELIVERY_GROUP_ID,
       order.deliveryGroupMessageId,
       undefined,
-      formatOrder(order)
+      formatOrder(order),
+      htmlOptions()
     );
   }
 
@@ -934,16 +955,14 @@ setInterval(async () => {
     const msg = await bot.telegram.sendMessage(
       DELIVERY_GROUP_ID,
       "📦 XRANENIYADAN CHIQDI\n\n" + formatOrder(order),
-      deliveryButtons(order)
+      htmlOptions(deliveryButtons(order))
     );
 
     order.deliveryGroupMessageId = msg.message_id;
     changed = true;
   }
 
-  if (changed) {
-    await saveOrders(orders);
-  }
+  if (changed) await saveOrders(orders);
 }, 60000);
 
 bot.catch((err) => {
@@ -952,7 +971,7 @@ bot.catch((err) => {
 
 bot.launch();
 
-console.log("Digi Dostavka running");
+console.log("DIGI DOSTAVKA — NEW FULL CODE RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
