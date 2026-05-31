@@ -50,6 +50,9 @@ type Order = {
   deliveredAt?: string;
   cancelledAt?: string;
 
+  comment?: string;
+  courierComment?: string;
+
   moyskladId?: string;
   moyskladHref?: string;
   moyskladName?: string;
@@ -99,6 +102,7 @@ const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
 
 const drafts = new Map<number, Draft>();
 const waitingPhoto = new Map<number, string>();
+const waitingComment = new Map<number, string>();
 const locks = new Set<string>();
 let moyskladSyncRunning = false;
 
@@ -195,6 +199,7 @@ function formatItems(items: OrderItem[] = []): string {
   for (const item of items) {
     const sklad = item.warehouseName || "-";
     if (!groups.has(sklad)) groups.set(sklad, []);
+
     const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}X` : "";
     groups.get(sklad)!.push(`<b>${escapeHtml(item.name.toUpperCase() + qtyText)}</b>`);
   }
@@ -222,13 +227,28 @@ function formatOrder(order: Partial<Order>): string {
     formatItems(order.items || []),
     "",
     `🕒 Yetkazish vaqti: ${escapeHtml(order.deliveryTime || "-")}`,
-    `🚚 Dostavshik: ${escapeHtml(order.courierName || "-")}`,
-    "",
-    `💳 To‘lov: ${paymentText(order)}`
+    `🚚 Dostavshik: ${escapeHtml(order.courierName || "-")}`
   ];
 
-  if (order.amount !== undefined && order.amount !== null) {
-    lines.push(`💵 Summa: ${order.amount} ${order.currency || ""}`);
+  if (order.comment) {
+    lines.push("");
+    lines.push("📝 Kommentariya:");
+    lines.push(escapeHtml(order.comment));
+  }
+
+  if (order.courierComment) {
+    lines.push("");
+    lines.push("💬 Dostavshik kommenti:");
+    lines.push(escapeHtml(order.courierComment));
+  }
+
+  if (order.type !== "moysklad") {
+    lines.push("");
+    lines.push(`💳 To‘lov: ${paymentText(order)}`);
+
+    if (order.amount !== undefined && order.amount !== null) {
+      lines.push(`💵 Summa: ${order.amount} ${order.currency || ""}`);
+    }
   }
 
   if (order.type === "storage") {
@@ -252,13 +272,14 @@ function deliveryButtons(order: Order): any {
   if (order.status === "created") {
     return Markup.inlineKeyboard([
       [Markup.button.callback("📦 SOBRANO", "assemble:" + order.id)],
-      [Markup.button.callback("❌ BEKOR QILISH", "cancel_real:" + order.id)]
+      [Markup.button.callback("💬 KOMMENTARIYA", "comment:" + order.id)]
     ]);
   }
 
   if (order.status === "assembled") {
     return Markup.inlineKeyboard([
-      [Markup.button.callback("✅ DOSTAVLENA", "deliver:" + order.id)]
+      [Markup.button.callback("✅ DOSTAVLENA", "deliver:" + order.id)],
+      [Markup.button.callback("💬 KOMMENTARIYA", "comment:" + order.id)]
     ]);
   }
 
@@ -322,6 +343,7 @@ async function msFetch(urlOrPath: string, options: any = {}): Promise<any> {
 
   const text = await res.text();
   let data: any = {};
+
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
@@ -358,7 +380,7 @@ function detectCurrency(msOrder: any): Currency {
 }
 
 function getAgentPhone(agent: any): string {
-  const phones = [
+  const phones: string[] = [
     agent?.phone,
     agent?.mobile,
     agent?.fax
@@ -384,6 +406,15 @@ function getAgentAddress(msOrder: any): string {
   );
 }
 
+function getMsComment(msOrder: any): string {
+  return (
+    msOrder?.description ||
+    msOrder?.comment ||
+    msOrder?.attributes?.find?.((a: any) => String(a.name || "").toLowerCase().includes("comment"))?.value ||
+    ""
+  );
+}
+
 async function findCustomerOrderStateByName(name: string): Promise<any | null> {
   const meta = await msFetch("/entity/customerorder/metadata");
   const states = meta?.states || [];
@@ -396,8 +427,10 @@ async function findCustomerOrderStateByName(name: string): Promise<any | null> {
 
 async function fetchPositions(msOrder: any): Promise<any[]> {
   if (msOrder?.positions?.rows) return msOrder.positions.rows;
+
   const href = msOrder?.positions?.meta?.href;
   if (!href) return [];
+
   const data = await msFetch(href + "?expand=assortment,store&limit=100");
   return data?.rows || [];
 }
@@ -441,15 +474,16 @@ async function convertMsOrderToLocalOrder(msOrder: any): Promise<Order> {
     clientPhone: getAgentPhone(msOrder?.agent),
     address: getAgentAddress(msOrder),
     items,
-    deliveryTime: msOrder?.shipmentAddressFull?.comment || msOrder?.deliveryPlannedMoment || "-",
+    deliveryTime: msOrder?.deliveryPlannedMoment || "-",
     paymentType: isPaid ? "paid" : "cash",
-    amount: isPaid ? undefined : debt || sum,
+    amount: debt || sum,
     currency,
     courierId: DEFAULT_COURIER?.id || 0,
     courierName: DEFAULT_COURIER?.name || "-",
     status: "created",
     createdBy: 0,
     createdAt: new Date().toISOString(),
+    comment: getMsComment(msOrder),
     moyskladId: msOrder?.id,
     moyskladHref: msOrder?.meta?.href,
     moyskladName: msOrder?.name
@@ -521,7 +555,9 @@ async function updateMoySkladOrderToDelivered(order: Order): Promise<void> {
   await msFetch(order.moyskladHref, {
     method: "PUT",
     body: JSON.stringify({
-      state: deliveredState
+      state: {
+        meta: deliveredState.meta
+      }
     })
   });
 
@@ -552,6 +588,7 @@ bot.command("id", async (ctx: any) => {
 
 bot.command("syncms", async (ctx: any) => {
   if (!isAdmin(ctx.from.id)) return;
+
   await ctx.reply("🔄 MoySklad tekshirilmoqda...");
   await syncMoySkladDeliveryOrders();
   await ctx.reply("✅ MoySklad sync tugadi");
@@ -573,29 +610,6 @@ bot.command("msdebug", async (ctx: any) => {
 
     await ctx.reply("📌 STATUSLAR:\n" + states);
     await ctx.reply("📦 OXIRGI ZAKAZLAR:\n" + (ordersText || "Zakaz topilmadi"));
-  } catch (e: any) {
-    console.error(e);
-    await ctx.reply("❌ MS DEBUG ERROR: " + e.message);
-  }
-});
-
-bot.command("msdebug", async (ctx: any) => {
-  if (!isAdmin(ctx.from.id)) return;
-
-  try {
-    const meta = await msFetch("/entity/customerorder/metadata");
-    const states = (meta?.states || []).map((s: any) => s.name).join("\n");
-
-    const data = await msFetch("/entity/customerorder?limit=10&order=updated,desc&expand=agent,store,state");
-    const ordersText = (data?.rows || [])
-      .map((o: any) => {
-        return `${o.name} | STATUS: ${o.state?.name || "-"} | CLIENT: ${o.agent?.name || "-"}`;
-      })
-      .join("\n");
-
-    await ctx.reply(
-      "📌 STATUSLAR:\n" + states + "\n\n📦 OXIRGI ZAKAZLAR:\n" + ordersText
-    );
   } catch (e: any) {
     console.error(e);
     await ctx.reply("❌ MS DEBUG ERROR: " + e.message);
@@ -707,6 +721,42 @@ bot.hears("📊 Otchetlar", async (ctx: any) => {
 
 bot.on("text", async (ctx: any) => {
   const userId = ctx.from.id;
+
+  const commentOrderId = waitingComment.get(userId);
+  if (commentOrderId) {
+    const orders = await getOrders();
+    const order = orders.find((x) => x.id === commentOrderId);
+
+    if (!order) {
+      waitingComment.delete(userId);
+      return ctx.reply("Zayavka topilmadi");
+    }
+
+    if (!isAdmin(userId) && order.courierId !== userId) {
+      waitingComment.delete(userId);
+      return ctx.reply("Bu sizning zayavkangiz emas");
+    }
+
+    const courier = COURIERS.find((x) => x.id === userId);
+    const name = courier?.name || ctx.from.first_name || order.courierName || "Dostavshik";
+    order.courierComment = `${name}: ${ctx.message.text.trim()}`;
+
+    await saveOrders(orders);
+    waitingComment.delete(userId);
+
+    if (order.deliveryGroupMessageId) {
+      await bot.telegram.editMessageText(
+        DELIVERY_GROUP_ID,
+        order.deliveryGroupMessageId,
+        undefined,
+        formatOrder(order),
+        htmlOptions(deliveryButtons(order))
+      );
+    }
+
+    return ctx.reply("✅ Kommentariya saqlandi");
+  }
+
   if (!isAdmin(userId)) return;
 
   const draft = drafts.get(userId);
@@ -824,6 +874,26 @@ bot.on("text", async (ctx: any) => {
     drafts.set(userId, draft);
     return showConfirm(ctx, draft);
   }
+});
+
+bot.action(/^comment:(.+)$/, async (ctx: any) => {
+  const orderId = ctx.match[1];
+  const orders = await getOrders();
+  const order = orders.find((x) => x.id === orderId);
+
+  if (!order) {
+    await ctx.answerCbQuery("Zayavka topilmadi");
+    return;
+  }
+
+  if (!isAdmin(ctx.from.id) && order.courierId !== ctx.from.id) {
+    await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
+    return;
+  }
+
+  waitingComment.set(ctx.from.id, orderId);
+  await ctx.answerCbQuery();
+  await ctx.reply("💬 Kommentariya yozing. Masalan: yetkazib berdim 1600$ oldim");
 });
 
 bot.action(/^warehouse:(.+)$/, async (ctx: any) => {
@@ -1056,7 +1126,9 @@ bot.action("confirm", async (ctx: any) => {
     status: draft.type === "storage" ? "scheduled" : "created",
     scheduledAt: draft.scheduledAt,
     createdBy: ctx.from.id,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    comment: draft.comment,
+    courierComment: draft.courierComment
   };
 
   const orders = await getOrders();
@@ -1172,6 +1244,15 @@ bot.on("photo", async (ctx: any) => {
     order.deliveredAt = new Date().toISOString();
     order.deliveredPhotoFileId = photo.file_id;
 
+    if (order.moyskladHref) {
+      try {
+        await updateMoySkladOrderToDelivered(order);
+      } catch (e) {
+        console.error("MoySklad delivered update error:", e);
+        await ctx.reply("⚠️ Telegramda yetkazildi, lekin MoySkladda status o‘zgarmadi. Terminal/Railway logsni tekshir.");
+      }
+    }
+
     await saveOrders(orders);
     waitingPhoto.delete(ctx.from.id);
 
@@ -1183,10 +1264,6 @@ bot.on("photo", async (ctx: any) => {
         formatOrder(order),
         htmlOptions()
       );
-    }
-
-    if (order.moyskladHref) {
-      await updateMoySkladOrderToDelivered(order);
     }
 
     await bot.telegram.sendPhoto(REPORT_GROUP_ID, photo.file_id, {
@@ -1202,9 +1279,6 @@ bot.on("photo", async (ctx: any) => {
     });
 
     await ctx.reply("✅ Yetkazildi va otchet yuborildi");
-  } catch (err) {
-    console.error("Photo delivery error:", err);
-    await ctx.reply("⚠️ Rasm qabul qilindi, lekin MoySklad/status update paytida xato chiqdi");
   } finally {
     locks.delete(orderId);
   }
@@ -1292,7 +1366,7 @@ bot.catch((err) => {
 
 bot.launch();
 
-console.log("DIGI DOSTAVKA — MOYSKLAD FULL CODE RUNNING");
+console.log("DIGI DOSTAVKA — COMMENT + DELIVERED MS FULL CODE RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
