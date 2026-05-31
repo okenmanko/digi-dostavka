@@ -226,9 +226,12 @@ function formatOrder(order: Partial<Order>): string {
     "",
     formatItems(order.items || []),
     "",
-    `🕒 Yetkazish vaqti: ${escapeHtml(order.deliveryTime || "-")}`,
-    `🚚 Dostavshik: ${escapeHtml(order.courierName || "-")}`
+    `🕒 Yetkazish vaqti: ${escapeHtml(order.deliveryTime || "-")}`
   ];
+
+  if (order.type !== "moysklad") {
+    lines.push(`🚚 Dostavshik: ${escapeHtml(order.courierName || "-")}`);
+  }
 
   if (order.comment) {
     lines.push("");
@@ -407,12 +410,25 @@ function getAgentAddress(msOrder: any): string {
 }
 
 function getMsComment(msOrder: any): string {
-  return (
+  const attrs = Array.isArray(msOrder?.attributes) ? msOrder.attributes : [];
+
+  const attrComment = attrs.find((a: any) => {
+    const name = String(a?.name || "").toLowerCase();
+    return (
+      name.includes("comment") ||
+      name.includes("коммент") ||
+      name.includes("izoh") ||
+      name.includes("изоҳ")
+    );
+  })?.value;
+
+  return String(
     msOrder?.description ||
     msOrder?.comment ||
-    msOrder?.attributes?.find?.((a: any) => String(a.name || "").toLowerCase().includes("comment"))?.value ||
+    msOrder?.shipmentAddressFull?.comment ||
+    attrComment ||
     ""
-  );
+  ).trim();
 }
 
 async function findCustomerOrderStateByName(name: string): Promise<any | null> {
@@ -478,8 +494,8 @@ async function convertMsOrderToLocalOrder(msOrder: any): Promise<Order> {
     paymentType: isPaid ? "paid" : "cash",
     amount: debt || sum,
     currency,
-    courierId: DEFAULT_COURIER?.id || 0,
-    courierName: DEFAULT_COURIER?.name || "-",
+    courierId: 0,
+    courierName: "",
     status: "created",
     createdBy: 0,
     createdAt: new Date().toISOString(),
@@ -732,9 +748,9 @@ bot.on("text", async (ctx: any) => {
       return ctx.reply("Zayavka topilmadi");
     }
 
-    if (!isAdmin(userId) && order.courierId !== userId) {
+    if (!isAdmin(userId) && !isCourier(userId)) {
       waitingComment.delete(userId);
-      return ctx.reply("Bu sizning zayavkangiz emas");
+      return ctx.reply("Ruxsat yo‘q");
     }
 
     const courier = COURIERS.find((x) => x.id === userId);
@@ -886,8 +902,8 @@ bot.action(/^comment:(.+)$/, async (ctx: any) => {
     return;
   }
 
-  if (!isAdmin(ctx.from.id) && order.courierId !== ctx.from.id) {
-    await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
+  if (!isAdmin(ctx.from.id) && !isCourier(ctx.from.id)) {
+    await ctx.answerCbQuery("Ruxsat yo‘q");
     return;
   }
 
@@ -1166,9 +1182,16 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
       return;
     }
 
-    if (!isAdmin(ctx.from.id) && order.courierId !== ctx.from.id) {
-      await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
-      return;
+    if (!isAdmin(ctx.from.id)) {
+      if (order.courierId && order.courierId !== ctx.from.id) {
+        await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
+        return;
+      }
+
+      if (!order.courierId && !isCourier(ctx.from.id)) {
+        await ctx.answerCbQuery("Ruxsat yo‘q");
+        return;
+      }
     }
 
     if (order.status !== "created") {
