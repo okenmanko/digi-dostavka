@@ -15,6 +15,11 @@ type Courier = {
   name: string;
 };
 
+type AdminUser = {
+  id: number;
+  name: string;
+};
+
 type Warehouse = {
   id: string;
   name: string;
@@ -40,6 +45,7 @@ type Order = {
   currency?: Currency;
   courierId: number;
   courierName: string;
+  managerName?: string;
   status: OrderStatus;
   scheduledAt?: string;
   deliveryGroupMessageId?: number;
@@ -68,10 +74,21 @@ if (!TOKEN) throw new Error("BOT_TOKEN topilmadi");
 
 const bot = new Telegraf(TOKEN);
 
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+const ADMINS: AdminUser[] = (process.env.ADMIN_IDS || "")
   .split(",")
-  .map((x) => Number(x.trim()))
-  .filter((x) => Number.isFinite(x) && x > 0);
+  .map((x) => {
+    const [idRaw, nameRaw] = x.split(":");
+    const id = Number((idRaw || "").trim());
+    const name = (nameRaw || "").trim();
+
+    return {
+      id,
+      name: name || String(id)
+    };
+  })
+  .filter((x) => Number.isFinite(x.id) && x.id > 0);
+
+const ADMIN_IDS = ADMINS.map((x) => x.id);
 
 const DELIVERY_GROUP_ID = Number(process.env.DELIVERY_GROUP_ID);
 const REPORT_GROUP_ID = Number(process.env.REPORT_GROUP_ID);
@@ -122,6 +139,11 @@ function escapeHtml(text: any): string {
 
 function isAdmin(id?: number): boolean {
   return !!id && ADMIN_IDS.includes(id);
+}
+
+function getAdminName(id?: number): string {
+  if (!id) return "-";
+  return ADMINS.find((x) => x.id === id)?.name || String(id);
 }
 
 function isCourier(id?: number): boolean {
@@ -263,6 +285,11 @@ function formatOrder(order: Partial<Order>): string {
   if (order.moyskladName) {
     lines.push("");
     lines.push(`🔗 MoySklad: ${escapeHtml(order.moyskladName)}`);
+  }
+
+  if (order.managerName) {
+    lines.push("");
+    lines.push(`👨‍💼 Manager: ${escapeHtml(order.managerName)}`);
   }
 
   lines.push("");
@@ -1139,6 +1166,7 @@ bot.action("confirm", async (ctx: any) => {
     currency: draft.currency,
     courierId: draft.courierId || 0,
     courierName: draft.courierName || "",
+    managerName: getAdminName(ctx.from.id),
     status: draft.type === "storage" ? "scheduled" : "created",
     scheduledAt: draft.scheduledAt,
     createdBy: ctx.from.id,
