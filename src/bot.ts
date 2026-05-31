@@ -560,8 +560,22 @@ async function syncMoySkladDeliveryOrders(): Promise<void> {
       const stateName = String(msOrder?.state?.name || "");
       if (stateName.toLowerCase() !== MOYSKLAD_DELIVERY_STATE_NAME.toLowerCase()) continue;
 
-      const alreadyExists = orders.some((x) => x.moyskladHref === msOrder?.meta?.href);
-      if (alreadyExists) continue;
+      const msId = String(msOrder?.id || "");
+      const msHref = String(msOrder?.meta?.href || "");
+      const msName = String(msOrder?.name || "");
+
+      const alreadyExists = orders.some((x) => {
+        return (
+          (msId && x.moyskladId === msId) ||
+          (msHref && x.moyskladHref === msHref) ||
+          (msName && x.moyskladName === msName) ||
+          (msName && x.id === "MS-" + msName)
+        );
+      });
+
+      if (alreadyExists) {
+        continue;
+      }
 
       const localOrder = await convertMsOrderToLocalOrder(msOrder);
 
@@ -636,6 +650,30 @@ bot.command("syncms", async (ctx: any) => {
   await syncMoySkladDeliveryOrders();
   await ctx.reply("✅ MoySklad sync tugadi");
 });
+
+bot.command("dedupe", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  const orders = await getOrders();
+  const seen = new Set<string>();
+  const cleaned: Order[] = [];
+
+  for (const order of orders) {
+    const key =
+      order.moyskladId ||
+      order.moyskladHref ||
+      order.moyskladName ||
+      order.id;
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(order);
+  }
+
+  await saveOrders(cleaned);
+  await ctx.reply(`✅ Dublikatlar tozalandi. Oldin: ${orders.length}, hozir: ${cleaned.length}`);
+});
+
 
 bot.command("msdebug", async (ctx: any) => {
   if (!isAdmin(ctx.from.id)) return;
