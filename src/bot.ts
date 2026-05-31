@@ -6,7 +6,7 @@ import path from "path";
 dotenv.config();
 
 type OrderStatus = "created" | "assembled" | "delivered" | "cancelled" | "scheduled";
-type OrderType = "normal" | "storage";
+type OrderType = "normal" | "storage" | "moysklad";
 type PaymentType = "paid" | "cash";
 type Currency = "USD" | "UZS";
 
@@ -24,6 +24,7 @@ type OrderItem = {
   name: string;
   warehouseId: string;
   warehouseName: string;
+  quantity?: number;
 };
 
 type Order = {
@@ -48,6 +49,10 @@ type Order = {
   assembledAt?: string;
   deliveredAt?: string;
   cancelledAt?: string;
+
+  moyskladId?: string;
+  moyskladHref?: string;
+  moyskladName?: string;
 };
 
 type Draft = Partial<Order> & {
@@ -79,6 +84,15 @@ const COURIERS: Courier[] = (process.env.COURIERS || "")
   })
   .filter((x) => Number.isFinite(x.id) && x.id > 0 && x.name.length > 0);
 
+const DEFAULT_COURIER_ID = Number(process.env.MOYSKLAD_DEFAULT_COURIER_ID || COURIERS[0]?.id || 0);
+const DEFAULT_COURIER = COURIERS.find((x) => x.id === DEFAULT_COURIER_ID) || COURIERS[0];
+
+const MOYSKLAD_TOKEN = process.env.MOYSKLAD_TOKEN || "";
+const MOYSKLAD_BASE = "https://online.moysklad.ru/api/remap/1.2";
+const MOYSKLAD_DELIVERY_STATE_NAME = process.env.MOYSKLAD_DELIVERY_STATE_NAME || "доставка";
+const MOYSKLAD_DELIVERED_STATE_NAME = process.env.MOYSKLAD_DELIVERED_STATE_NAME || "Доставлен";
+const MOYSKLAD_SYNC_INTERVAL_SECONDS = Number(process.env.MOYSKLAD_SYNC_INTERVAL_SECONDS || 60);
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
 const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
@@ -86,6 +100,7 @@ const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
 const drafts = new Map<number, Draft>();
 const waitingPhoto = new Map<number, string>();
 const locks = new Set<string>();
+let moyskladSyncRunning = false;
 
 function htmlOptions(extra?: any): any {
   return {
@@ -94,7 +109,7 @@ function htmlOptions(extra?: any): any {
   };
 }
 
-function escapeHtml(text: string): string {
+function escapeHtml(text: any): string {
   return String(text || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -180,7 +195,8 @@ function formatItems(items: OrderItem[] = []): string {
   for (const item of items) {
     const sklad = item.warehouseName || "-";
     if (!groups.has(sklad)) groups.set(sklad, []);
-    groups.get(sklad)!.push(`<b>${escapeHtml(item.name.toUpperCase())}</b>`);
+    const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}X` : "";
+    groups.get(sklad)!.push(`<b>${escapeHtml(item.name.toUpperCase() + qtyText)}</b>`);
   }
 
   return Array.from(groups.entries())
@@ -211,7 +227,7 @@ function formatOrder(order: Partial<Order>): string {
     `💳 To‘lov: ${paymentText(order)}`
   ];
 
-  if (order.amount) {
+  if (order.amount !== undefined && order.amount !== null) {
     lines.push(`💵 Summa: ${order.amount} ${order.currency || ""}`);
   }
 
@@ -219,6 +235,11 @@ function formatOrder(order: Partial<Order>): string {
     lines.push("");
     lines.push("📦 XRANENIYA");
     lines.push(`⏰ Chiqish vaqti: ${escapeHtml(order.scheduledAt || "-")}`);
+  }
+
+  if (order.moyskladName) {
+    lines.push("");
+    lines.push(`🔗 MoySklad: ${escapeHtml(order.moyskladName)}`);
   }
 
   lines.push("");
@@ -280,6 +301,237 @@ async function showConfirm(ctx: any, draft: Draft) {
   );
 }
 
+/* =========================
+   MOYSKLAD API
+========================= */
+
+async function msFetch(urlOrPath: string, options: any = {}): Promise<any> {
+  if (!MOYSKLAD_TOKEN) throw new Error("MOYSKLAD_TOKEN topilmadi");
+
+  const url = urlOrPath.startsWith("http") ? urlOrPath : MOYSKLAD_BASE + urlOrPath;
+
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${MOYSKLAD_TOKEN}`,
+      "Content-Type": "application/json",
+      Accept: "application/json;charset=utf-8",
+      ...(options.headers || {})
+    }
+  });
+
+  const text = await res.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    console.error("MOYSKLAD API ERROR", res.status, data);
+    throw new Error(`MoySklad API xato: ${res.status}`);
+  }
+
+  return data;
+}
+
+function moneyFromMs(value: any): number {
+  const n = Number(value || 0);
+  return Math.round((n / 100) * 100) / 100;
+}
+
+function detectCurrency(msOrder: any): Currency {
+  const raw = [
+    msOrder?.rate?.currency?.name,
+    msOrder?.rate?.currency?.fullName,
+    msOrder?.rate?.currency?.isoCode,
+    msOrder?.currency?.name,
+    msOrder?.currency?.isoCode
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (raw.includes("usd") || raw.includes("дол") || raw.includes("dollar")) return "USD";
+  return "UZS";
+}
+
+function getAgentPhone(agent: any): string {
+  const phones = [
+    agent?.phone,
+    agent?.mobile,
+    agent?.fax
+  ].filter(Boolean);
+
+  if (Array.isArray(agent?.contactpersons?.rows)) {
+    for (const c of agent.contactpersons.rows) {
+      if (c?.phone) phones.push(c.phone);
+      if (c?.mobile) phones.push(c.mobile);
+    }
+  }
+
+  return String(phones[0] || "-");
+}
+
+function getAgentAddress(msOrder: any): string {
+  return (
+    msOrder?.shipmentAddress ||
+    msOrder?.agent?.actualAddress ||
+    msOrder?.agent?.legalAddress ||
+    msOrder?.agent?.address ||
+    "-"
+  );
+}
+
+async function findCustomerOrderStateByName(name: string): Promise<any | null> {
+  const meta = await msFetch("/entity/customerorder/metadata");
+  const states = meta?.states || [];
+
+  return (
+    states.find((x: any) => String(x.name || "").toLowerCase() === name.toLowerCase()) ||
+    null
+  );
+}
+
+async function fetchPositions(msOrder: any): Promise<any[]> {
+  if (msOrder?.positions?.rows) return msOrder.positions.rows;
+  const href = msOrder?.positions?.meta?.href;
+  if (!href) return [];
+  const data = await msFetch(href + "?expand=assortment,store&limit=100");
+  return data?.rows || [];
+}
+
+function msOrderNumber(msOrder: any): string {
+  return String(msOrder?.name || msOrder?.id || Date.now());
+}
+
+async function convertMsOrderToLocalOrder(msOrder: any): Promise<Order> {
+  const positions = await fetchPositions(msOrder);
+  const currency = detectCurrency(msOrder);
+  const sum = moneyFromMs(msOrder?.sum);
+  const payedSum = moneyFromMs(msOrder?.payedSum);
+  const debt = Math.max(0, Math.round((sum - payedSum) * 100) / 100);
+  const isPaid = sum > 0 && payedSum >= sum;
+
+  const items: OrderItem[] = positions.map((p: any) => {
+    const productName =
+      p?.assortment?.name ||
+      p?.name ||
+      p?.assortment?.code ||
+      "Mahsulot";
+
+    const warehouseName =
+      p?.store?.name ||
+      msOrder?.store?.name ||
+      "-";
+
+    return {
+      name: productName,
+      warehouseId: p?.store?.id || msOrder?.store?.id || "",
+      warehouseName,
+      quantity: Number(p?.quantity || 1)
+    };
+  });
+
+  return {
+    id: "MS-" + msOrderNumber(msOrder),
+    type: "moysklad",
+    clientName: msOrder?.agent?.name || "-",
+    clientPhone: getAgentPhone(msOrder?.agent),
+    address: getAgentAddress(msOrder),
+    items,
+    deliveryTime: msOrder?.shipmentAddressFull?.comment || msOrder?.deliveryPlannedMoment || "-",
+    paymentType: isPaid ? "paid" : "cash",
+    amount: isPaid ? undefined : debt || sum,
+    currency,
+    courierId: DEFAULT_COURIER?.id || 0,
+    courierName: DEFAULT_COURIER?.name || "-",
+    status: "created",
+    createdBy: 0,
+    createdAt: new Date().toISOString(),
+    moyskladId: msOrder?.id,
+    moyskladHref: msOrder?.meta?.href,
+    moyskladName: msOrder?.name
+  };
+}
+
+async function syncMoySkladDeliveryOrders(): Promise<void> {
+  if (!MOYSKLAD_TOKEN) return;
+  if (moyskladSyncRunning) return;
+
+  moyskladSyncRunning = true;
+
+  try {
+    const deliveryState = await findCustomerOrderStateByName(MOYSKLAD_DELIVERY_STATE_NAME);
+
+    if (!deliveryState?.meta?.href) {
+      console.error("MoySklad status topilmadi:", MOYSKLAD_DELIVERY_STATE_NAME);
+      return;
+    }
+
+    const url =
+      `/entity/customerorder?limit=50` +
+      `&order=updated,desc` +
+      `&expand=agent,store,state`;
+
+    const data = await msFetch(url);
+    const rows = data?.rows || [];
+    const orders = await getOrders();
+
+    for (const msOrder of rows) {
+      const stateName = String(msOrder?.state?.name || "");
+      if (stateName.toLowerCase() !== MOYSKLAD_DELIVERY_STATE_NAME.toLowerCase()) continue;
+
+      const alreadyExists = orders.some((x) => x.moyskladHref === msOrder?.meta?.href);
+      if (alreadyExists) continue;
+
+      const localOrder = await convertMsOrderToLocalOrder(msOrder);
+
+      const msg = await bot.telegram.sendMessage(
+        DELIVERY_GROUP_ID,
+        formatOrder(localOrder),
+        htmlOptions(deliveryButtons(localOrder))
+      );
+
+      localOrder.deliveryGroupMessageId = msg.message_id;
+      orders.push(localOrder);
+      await saveOrders(orders);
+
+      console.log("MoySklad zayavka yuborildi:", localOrder.id);
+    }
+  } catch (err) {
+    console.error("MoySklad sync error:", err);
+  } finally {
+    moyskladSyncRunning = false;
+  }
+}
+
+async function updateMoySkladOrderToDelivered(order: Order): Promise<void> {
+  if (!MOYSKLAD_TOKEN) return;
+  if (!order.moyskladHref) return;
+
+  const deliveredState = await findCustomerOrderStateByName(MOYSKLAD_DELIVERED_STATE_NAME);
+
+  if (!deliveredState?.meta) {
+    console.error("MoySklad delivered status topilmadi:", MOYSKLAD_DELIVERED_STATE_NAME);
+    return;
+  }
+
+  await msFetch(order.moyskladHref, {
+    method: "PUT",
+    body: JSON.stringify({
+      state: deliveredState
+    })
+  });
+
+  console.log("MoySklad status Доставлен qilindi:", order.id);
+}
+
+/* =========================
+   BOT HANDLERS
+========================= */
+
 bot.start(async (ctx: any) => {
   const userId = ctx.from?.id;
 
@@ -296,6 +548,13 @@ bot.start(async (ctx: any) => {
 
 bot.command("id", async (ctx: any) => {
   await ctx.reply("🆔 User ID: " + ctx.from.id + "\n💬 Chat ID: " + ctx.chat.id);
+});
+
+bot.command("syncms", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+  await ctx.reply("🔄 MoySklad tekshirilmoqda...");
+  await syncMoySkladDeliveryOrders();
+  await ctx.reply("✅ MoySklad sync tugadi");
 });
 
 bot.hears("🏬 Skladlar", async (ctx: any) => {
@@ -881,6 +1140,10 @@ bot.on("photo", async (ctx: any) => {
       );
     }
 
+    if (order.moyskladHref) {
+      await updateMoySkladOrderToDelivered(order);
+    }
+
     await bot.telegram.sendPhoto(REPORT_GROUP_ID, photo.file_id, {
       parse_mode: "HTML",
       caption: [
@@ -894,6 +1157,9 @@ bot.on("photo", async (ctx: any) => {
     });
 
     await ctx.reply("✅ Yetkazildi va otchet yuborildi");
+  } catch (err) {
+    console.error("Photo delivery error:", err);
+    await ctx.reply("⚠️ Rasm qabul qilindi, lekin MoySklad/status update paytida xato chiqdi");
   } finally {
     locks.delete(orderId);
   }
@@ -965,13 +1231,23 @@ setInterval(async () => {
   if (changed) await saveOrders(orders);
 }, 60000);
 
+if (MOYSKLAD_TOKEN) {
+  setTimeout(() => {
+    syncMoySkladDeliveryOrders();
+  }, 5000);
+
+  setInterval(() => {
+    syncMoySkladDeliveryOrders();
+  }, Math.max(15, MOYSKLAD_SYNC_INTERVAL_SECONDS) * 1000);
+}
+
 bot.catch((err) => {
   console.error("BOT ERROR:", err);
 });
 
 bot.launch();
 
-console.log("DIGI DOSTAVKA — NEW FULL CODE RUNNING");
+console.log("DIGI DOSTAVKA — MOYSKLAD FULL CODE RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
