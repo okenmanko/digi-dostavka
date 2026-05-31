@@ -557,6 +557,51 @@ bot.command("syncms", async (ctx: any) => {
   await ctx.reply("✅ MoySklad sync tugadi");
 });
 
+bot.command("msdebug", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  try {
+    await ctx.reply("🔍 Debug boshlandi...");
+
+    const meta = await msFetch("/entity/customerorder/metadata");
+    const states = (meta?.states || []).map((s: any) => s.name).join("\n");
+
+    const data = await msFetch("/entity/customerorder?limit=10&order=updated,desc&expand=agent,store,state");
+    const ordersText = (data?.rows || [])
+      .map((o: any) => `${o.name} | STATUS: ${o.state?.name || "-"} | CLIENT: ${o.agent?.name || "-"}`)
+      .join("\n");
+
+    await ctx.reply("📌 STATUSLAR:\n" + states);
+    await ctx.reply("📦 OXIRGI ZAKAZLAR:\n" + (ordersText || "Zakaz topilmadi"));
+  } catch (e: any) {
+    console.error(e);
+    await ctx.reply("❌ MS DEBUG ERROR: " + e.message);
+  }
+});
+
+bot.command("msdebug", async (ctx: any) => {
+  if (!isAdmin(ctx.from.id)) return;
+
+  try {
+    const meta = await msFetch("/entity/customerorder/metadata");
+    const states = (meta?.states || []).map((s: any) => s.name).join("\n");
+
+    const data = await msFetch("/entity/customerorder?limit=10&order=updated,desc&expand=agent,store,state");
+    const ordersText = (data?.rows || [])
+      .map((o: any) => {
+        return `${o.name} | STATUS: ${o.state?.name || "-"} | CLIENT: ${o.agent?.name || "-"}`;
+      })
+      .join("\n");
+
+    await ctx.reply(
+      "📌 STATUSLAR:\n" + states + "\n\n📦 OXIRGI ZAKAZLAR:\n" + ordersText
+    );
+  } catch (e: any) {
+    console.error(e);
+    await ctx.reply("❌ MS DEBUG ERROR: " + e.message);
+  }
+});
+
 bot.hears("🏬 Skladlar", async (ctx: any) => {
   if (!isAdmin(ctx.from.id)) return;
 
