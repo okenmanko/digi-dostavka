@@ -1283,11 +1283,6 @@ bot.action(/^deliver:(.+)$/, async (ctx: any) => {
     return;
   }
 
-  if (!isAdmin(ctx.from.id) && order.courierId !== ctx.from.id) {
-    await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
-    return;
-  }
-
   if (order.status !== "assembled") {
     await ctx.answerCbQuery("Avval SOBRANO bosilishi kerak");
     return;
