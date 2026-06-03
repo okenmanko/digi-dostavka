@@ -1248,16 +1248,9 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
       return;
     }
 
-    if (!isAdmin(ctx.from.id)) {
-      if (order.courierId && order.courierId !== ctx.from.id) {
-        await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
-        return;
-      }
-
-      if (!order.courierId && !isCourier(ctx.from.id)) {
-        await ctx.answerCbQuery("Ruxsat yo‘q");
-        return;
-      }
+    if (!isAdmin(ctx.from.id) && !isCourier(ctx.from.id)) {
+      await ctx.answerCbQuery("Ruxsat yo‘q");
+      return;
     }
 
     if (order.status !== "created") {
