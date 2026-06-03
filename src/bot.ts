@@ -1248,11 +1248,6 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
       return;
     }
 
-    if (!isAdmin(ctx.from.id) && !isCourier(ctx.from.id)) {
-      await ctx.answerCbQuery("Ruxsat yo‘q");
-      return;
-    }
-
     if (order.status !== "created") {
       await ctx.answerCbQuery("Bu statusni o‘zgartirib bo‘lmaydi");
       return;
