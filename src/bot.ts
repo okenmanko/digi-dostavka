@@ -69,10 +69,16 @@ type Draft = Partial<Order> & {
   tempItemName?: string;
 };
 
+type DeliveryPhotoSession = {
+  orderId: string;
+  photos: string[];
+};
+
 const TOKEN = process.env.BOT_TOKEN || "";
 if (!TOKEN) throw new Error("BOT_TOKEN topilmadi");
 
 const bot = new Telegraf(TOKEN);
+const BOT_USERNAME = process.env.BOT_USERNAME || "";
 
 const ADMINS: AdminUser[] = (process.env.ADMIN_IDS || "")
   .split(",")
@@ -192,10 +198,26 @@ function adminMenu() {
   ]).resize();
 }
 
+function courierMenu() {
+  return Markup.keyboard([
+    ["➕ Shoshilinch zayavka"]
+  ]).resize();
+}
+
 function courierKeyboard() {
   return Markup.inlineKeyboard(
     COURIERS.map((x) => [Markup.button.callback("🚚 " + x.name, "courier:" + x.id)])
   );
+}
+
+function getBotUsername(): string {
+  return BOT_USERNAME || ((bot as any).botInfo?.username || "");
+}
+
+function deliveryDoneKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Tayyor", "finish_delivery_photos")]
+  ]);
 }
 
 function paymentText(order: Partial<Order>): string {
@@ -307,6 +329,15 @@ function deliveryButtons(order: Order): any {
   }
 
   if (order.status === "assembled") {
+    const username = getBotUsername();
+
+    if (username) {
+      return Markup.inlineKeyboard([
+        [Markup.button.url("✅ DOSTAVLENA", `https://t.me/${username}?start=deliver_${order.id}`)],
+        [Markup.button.callback("💬 KOMMENTARIYA", "comment:" + order.id)]
+      ]);
+    }
+
     return Markup.inlineKeyboard([
       [Markup.button.callback("✅ DOSTAVLENA", "deliver:" + order.id)],
       [Markup.button.callback("💬 KOMMENTARIYA", "comment:" + order.id)]
@@ -621,19 +652,157 @@ async function updateMoySkladOrderToDelivered(order: Order): Promise<void> {
   console.log("MoySklad status Доставлен qilindi:", order.id);
 }
 
+
+async function startDeliveryPhotoSession(ctx: any, orderId: string): Promise<void> {
+  const orders = await getOrders();
+  const order = orders.find((x) => x.id === orderId);
+
+  if (!order) {
+    await ctx.reply("Zayavka topilmadi");
+    return;
+  }
+
+  if (order.status !== "assembled") {
+    await ctx.reply("Avval SOBRANO bosilishi kerak");
+    return;
+  }
+
+  deliveryPhotoSessions.set(ctx.from.id, {
+    orderId,
+    photos: []
+  });
+
+  await ctx.reply(
+    [
+      "📸 Yetkazilganini tasdiqlash uchun rasmlarni shu chatga yuboring.",
+      "",
+      "1 tadan 10 tagacha rasm yuborishingiz mumkin.",
+      "Hammasini yuborib bo‘lgach ✅ Tayyor tugmasini bosing.",
+      "",
+      `📋 Zayavka: ${order.id}`
+    ].join("\n"),
+    deliveryDoneKeyboard()
+  );
+}
+
+async function finishDeliveryPhotoSession(ctx: any): Promise<void> {
+  const session = deliveryPhotoSessions.get(ctx.from.id);
+
+  if (!session) {
+    await ctx.answerCbQuery?.("Aktiv rasm sessiyasi yo‘q");
+    return;
+  }
+
+  if (!session.photos.length) {
+    await ctx.answerCbQuery?.("Avval kamida 1 ta rasm yuboring");
+    await ctx.reply("Avval kamida 1 ta rasm yuboring 📸");
+    return;
+  }
+
+  const orderId = session.orderId;
+
+  if (locks.has(orderId)) return;
+  locks.add(orderId);
+
+  try {
+    const orders = await getOrders();
+    const order = orders.find((x) => x.id === orderId);
+
+    if (!order) {
+      deliveryPhotoSessions.delete(ctx.from.id);
+      await ctx.reply("Zayavka topilmadi");
+      return;
+    }
+
+    order.status = "delivered";
+    order.deliveredAt = new Date().toISOString();
+    order.deliveredPhotoFileId = session.photos[0];
+
+    if (order.moyskladHref) {
+      try {
+        await updateMoySkladOrderToDelivered(order);
+      } catch (e) {
+        console.error("MoySklad delivered update error:", e);
+        await ctx.reply("⚠️ Telegramda yetkazildi, lekin MoySkladda status o‘zgarmadi. Railway logsni tekshir.");
+      }
+    }
+
+    await saveOrders(orders);
+    deliveryPhotoSessions.delete(ctx.from.id);
+    waitingPhoto.delete(ctx.from.id);
+
+    if (order.deliveryGroupMessageId) {
+      await bot.telegram.editMessageText(
+        DELIVERY_GROUP_ID,
+        order.deliveryGroupMessageId,
+        undefined,
+        formatOrder(order),
+        htmlOptions()
+      );
+
+      setTimeout(async () => {
+        try {
+          await bot.telegram.deleteMessage(DELIVERY_GROUP_ID, order.deliveryGroupMessageId!);
+        } catch (e) {
+          console.error("Delivery group message delete error:", e);
+        }
+      }, 60_000);
+    }
+
+    const caption = [
+      "✅ YETKAZILDI",
+      "",
+      formatOrder(order),
+      "",
+      "🕒 Yetkazilgan vaqt:",
+      escapeHtml(new Date().toLocaleString("ru-RU"))
+    ].join("\n");
+
+    const photos = session.photos.slice(0, 10);
+
+    if (photos.length === 1) {
+      await bot.telegram.sendPhoto(REPORT_GROUP_ID, photos[0], {
+        parse_mode: "HTML",
+        caption
+      });
+    } else {
+      await bot.telegram.sendMediaGroup(
+        REPORT_GROUP_ID,
+        photos.map((fileId, index) => ({
+          type: "photo",
+          media: fileId,
+          ...(index === 0 ? { caption, parse_mode: "HTML" } : {})
+        })) as any
+      );
+    }
+
+    await ctx.answerCbQuery?.("✅ Tayyor");
+    await ctx.reply("✅ Yetkazildi, rasmlar otchet gruppaga yuborildi va status yangilandi");
+  } finally {
+    locks.delete(orderId);
+  }
+}
+
 /* =========================
    BOT HANDLERS
 ========================= */
 
 bot.start(async (ctx: any) => {
   const userId = ctx.from?.id;
+  const text = ctx.message?.text || "";
+  const payload = text.split(" ")[1] || "";
+
+  if (payload.startsWith("deliver_")) {
+    const orderId = payload.replace("deliver_", "");
+    return startDeliveryPhotoSession(ctx, orderId);
+  }
 
   if (isAdmin(userId)) {
     return ctx.reply("👨‍💼 Admin panel", adminMenu());
   }
 
   if (isCourier(userId)) {
-    return ctx.reply("🚚 Courier panel. Zayavkalar delivery guruhga keladi.");
+    return ctx.reply("🚚 Courier panel", courierMenu());
   }
 
   return ctx.reply("⛔ Ruxsat yo‘q");
@@ -642,6 +811,18 @@ bot.start(async (ctx: any) => {
 bot.command("id", async (ctx: any) => {
   await ctx.reply("🆔 User ID: " + ctx.from.id + "\n💬 Chat ID: " + ctx.chat.id);
 });
+
+bot.command("deliver", async (ctx: any) => {
+  const text = ctx.message?.text || "";
+  const orderId = text.split(" ")[1];
+
+  if (!orderId) {
+    return ctx.reply("Format: /deliver MS-00031");
+  }
+
+  return startDeliveryPhotoSession(ctx, orderId);
+});
+
 
 bot.command("syncms", async (ctx: any) => {
   if (!isAdmin(ctx.from.id)) return;
@@ -800,6 +981,24 @@ bot.hears("📊 Otchetlar", async (ctx: any) => {
   ].join("\n"));
 });
 
+
+bot.hears("➕ Shoshilinch zayavka", async (ctx: any) => {
+  if (!isCourier(ctx.from.id) && !isAdmin(ctx.from.id)) return;
+
+  drafts.set(ctx.from.id, {
+    type: "normal",
+    items: [],
+    step: "urgent_model",
+    courierId: ctx.from.id,
+    courierName: COURIERS.find((x) => x.id === ctx.from.id)?.name || ctx.from.first_name || "Dostavshik",
+    status: "delivered",
+    createdBy: ctx.from.id,
+    createdAt: new Date().toISOString()
+  });
+
+  await ctx.reply("🛒 Model/tovar nomini yozing");
+});
+
 bot.on("text", async (ctx: any) => {
   const userId = ctx.from.id;
 
@@ -838,12 +1037,61 @@ bot.on("text", async (ctx: any) => {
     return ctx.reply("✅ Kommentariya saqlandi");
   }
 
+  const draft = drafts.get(userId);
+  const text = ctx.message.text.trim();
+
+  if (draft?.step === "urgent_model") {
+    draft.items = [{
+      name: text.toUpperCase(),
+      warehouseId: "",
+      warehouseName: "-"
+    }];
+    draft.step = "urgent_comment";
+    drafts.set(userId, draft);
+    return ctx.reply("💬 Izoh yozing. Masalan: aka Avaz olib ketdilar");
+  }
+
+  if (draft?.step === "urgent_comment") {
+    const courierName = COURIERS.find((x) => x.id === userId)?.name || ctx.from.first_name || "Dostavshik";
+    const order: Order = {
+      id: "URG-" + Date.now(),
+      type: "normal",
+      clientName: "-",
+      clientPhone: "-",
+      address: "-",
+      items: draft.items || [],
+      deliveryTime: new Date().toLocaleString("ru-RU"),
+      paymentType: "paid",
+      courierId: userId,
+      courierName,
+      status: "delivered",
+      createdBy: userId,
+      createdAt: new Date().toISOString(),
+      deliveredAt: new Date().toISOString(),
+      courierComment: `${courierName}: ${text}`
+    };
+
+    const orders = await getOrders();
+    orders.push(order);
+    await saveOrders(orders);
+    drafts.delete(userId);
+
+    await bot.telegram.sendMessage(
+      REPORT_GROUP_ID,
+      [
+        "🚨 SHOSHILINCH ZAYAVKA",
+        "",
+        formatOrder(order)
+      ].join("\n"),
+      htmlOptions()
+    );
+
+    return ctx.reply("✅ Shoshilinch zayavka otchet gruppaga yuborildi", courierMenu());
+  }
+
   if (!isAdmin(userId)) return;
 
-  const draft = drafts.get(userId);
   if (!draft?.step) return;
-
-  const text = ctx.message.text.trim();
 
   if (draft.step === "warehouse_name") {
     const warehouses = await getWarehouses();
@@ -976,6 +1224,11 @@ bot.action(/^comment:(.+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   await ctx.reply("💬 Kommentariya yozing. Masalan: yetkazib berdim 1600$ oldim");
 });
+
+bot.action("finish_delivery_photos", async (ctx: any) => {
+  await finishDeliveryPhotoSession(ctx);
+});
+
 
 bot.action(/^warehouse:(.+)$/, async (ctx: any) => {
   if (!isAdmin(ctx.from.id)) return;
@@ -1248,6 +1501,18 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
       return;
     }
 
+    if (!isAdmin(ctx.from.id)) {
+      if (order.courierId && order.courierId !== ctx.from.id) {
+        await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
+        return;
+      }
+
+      if (!order.courierId && !isCourier(ctx.from.id)) {
+        await ctx.answerCbQuery("Ruxsat yo‘q");
+        return;
+      }
+    }
+
     if (order.status !== "created") {
       await ctx.answerCbQuery("Bu statusni o‘zgartirib bo‘lmaydi");
       return;
@@ -1275,85 +1540,40 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
 
 bot.action(/^deliver:(.+)$/, async (ctx: any) => {
   const orderId = ctx.match[1];
-  const orders = await getOrders();
-  const order = orders.find((x) => x.id === orderId);
 
-  if (!order) {
-    await ctx.answerCbQuery("Zayavka topilmadi");
-    return;
-  }
-
-  if (order.status !== "assembled") {
-    await ctx.answerCbQuery("Avval SOBRANO bosilishi kerak");
-    return;
-  }
-
-  waitingPhoto.set(ctx.from.id, orderId);
   await ctx.answerCbQuery();
-  await ctx.reply("📸 Yetkazilganini tasdiqlash uchun rasm yuboring");
+  return startDeliveryPhotoSession(ctx, orderId);
 });
 
 bot.on("photo", async (ctx: any) => {
-  const orderId = waitingPhoto.get(ctx.from.id);
-  if (!orderId) return;
+  const session = deliveryPhotoSessions.get(ctx.from.id);
 
-  if (locks.has(orderId)) return;
-  locks.add(orderId);
-
-  try {
-    const orders = await getOrders();
-    const order = orders.find((x) => x.id === orderId);
-
-    if (!order) {
-      await ctx.reply("Zayavka topilmadi");
-      return;
+  if (session) {
+    if (session.photos.length >= 10) {
+      return ctx.reply("10 ta rasm qabul qilindi. Endi ✅ Tayyor tugmasini bosing.", deliveryDoneKeyboard());
     }
 
     const photos = ctx.message.photo;
     const photo = photos[photos.length - 1];
 
-    order.status = "delivered";
-    order.deliveredAt = new Date().toISOString();
-    order.deliveredPhotoFileId = photo.file_id;
+    session.photos.push(photo.file_id);
+    deliveryPhotoSessions.set(ctx.from.id, session);
 
-    if (order.moyskladHref) {
-      try {
-        await updateMoySkladOrderToDelivered(order);
-      } catch (e) {
-        console.error("MoySklad delivered update error:", e);
-        await ctx.reply("⚠️ Telegramda yetkazildi, lekin MoySkladda status o‘zgarmadi. Terminal/Railway logsni tekshir.");
-      }
-    }
-
-    await saveOrders(orders);
-    waitingPhoto.delete(ctx.from.id);
-
-    if (order.deliveryGroupMessageId) {
-      await bot.telegram.editMessageText(
-        DELIVERY_GROUP_ID,
-        order.deliveryGroupMessageId,
-        undefined,
-        formatOrder(order),
-        htmlOptions()
-      );
-    }
-
-    await bot.telegram.sendPhoto(REPORT_GROUP_ID, photo.file_id, {
-      parse_mode: "HTML",
-      caption: [
-        "✅ YETKAZILDI",
-        "",
-        formatOrder(order),
-        "",
-        "🕒 Yetkazilgan vaqt:",
-        escapeHtml(new Date().toLocaleString("ru-RU"))
-      ].join("\n")
-    });
-
-    await ctx.reply("✅ Yetkazildi va otchet yuborildi");
-  } finally {
-    locks.delete(orderId);
+    return ctx.reply(
+      `✅ Rasm qabul qilindi (${session.photos.length}/10). Yana rasm yuboring yoki ✅ Tayyor bosing.`,
+      deliveryDoneKeyboard()
+    );
   }
+
+  const orderId = waitingPhoto.get(ctx.from.id);
+  if (!orderId) return;
+
+  deliveryPhotoSessions.set(ctx.from.id, {
+    orderId,
+    photos: []
+  });
+
+  return ctx.reply("Rasm qabul qilish sessiyasi ochildi. Rasmni qayta yuboring 📸", deliveryDoneKeyboard());
 });
 
 bot.action(/^cancel_real:(.+)$/, async (ctx: any) => {
