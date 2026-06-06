@@ -1438,14 +1438,25 @@ bot.action("cancel", async (ctx: any) => {
 });
 
 bot.action("confirm", async (ctx: any) => {
-  if (!isAdmin(ctx.from.id)) return;
+  const userId = ctx.from.id;
 
-  const draft = drafts.get(ctx.from.id);
+  console.log("CONFIRM CLICKED BY:", userId);
 
-  if (!draft) {
-    await ctx.answerCbQuery("Draft topilmadi");
+  if (!isAdmin(userId)) {
+    await ctx.answerCbQuery("Siz admin emassiz");
     return;
   }
+
+  const draft = drafts.get(userId);
+
+  if (!draft) {
+    console.log("DRAFT NOT FOUND FOR:", userId);
+    await ctx.answerCbQuery("Draft topilmadi");
+    await ctx.reply("❌ Draft topilmadi. Zayavkani boshidan yarating.");
+    return;
+  }
+
+  console.log("DRAFT FOUND:", draft);
 
   const order: Order = {
     id: "ORD-" + Date.now(),
@@ -1460,10 +1471,10 @@ bot.action("confirm", async (ctx: any) => {
     currency: draft.currency,
     courierId: draft.courierId || 0,
     courierName: draft.courierName || "",
-    managerName: getAdminName(ctx.from.id),
+    managerName: getAdminName(userId),
     status: draft.type === "storage" ? "scheduled" : "created",
     scheduledAt: draft.scheduledAt,
-    createdBy: ctx.from.id,
+    createdBy: userId,
     createdAt: new Date().toISOString(),
     comment: draft.comment,
     courierComment: draft.courierComment
@@ -1483,9 +1494,9 @@ bot.action("confirm", async (ctx: any) => {
 
   orders.push(order);
   await saveOrders(orders);
-  drafts.delete(ctx.from.id);
+  drafts.delete(userId);
 
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery("✅ Tasdiqlandi");
   await ctx.reply("✅ Zayavka saqlandi", adminMenu());
 });
 
