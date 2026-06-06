@@ -1015,11 +1015,6 @@ bot.on("text", async (ctx: any) => {
       return ctx.reply("Zayavka topilmadi");
     }
 
-    if (!isAdmin(userId) && !isCourier(userId)) {
-      waitingComment.delete(userId);
-      return ctx.reply("Ruxsat yo‘q");
-    }
-
     const courier = COURIERS.find((x) => x.id === userId);
     const name = courier?.name || ctx.from.first_name || order.courierName || "Dostavshik";
     order.courierComment = `${name}: ${ctx.message.text.trim()}`;
@@ -1511,11 +1506,6 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
       return;
     }
 
-    if (!isAdmin(ctx.from.id) && !isCourier(ctx.from.id)) {
-      await ctx.answerCbQuery("Ruxsat yo‘q");
-      return;
-    }
-
     if (order.status !== "created") {
       await ctx.answerCbQuery("Bu statusni o‘zgartirib bo‘lmaydi");
       return;
@@ -1575,11 +1565,6 @@ bot.on("photo", async (ctx: any) => {
 });
 
 bot.action(/^cancel_real:(.+)$/, async (ctx: any) => {
-  if (!isAdmin(ctx.from.id)) {
-    await ctx.answerCbQuery("Faqat admin bekor qila oladi");
-    return;
-  }
-
   const orderId = ctx.match[1];
   const orders = await getOrders();
   const order = orders.find((x) => x.id === orderId);
@@ -1656,7 +1641,7 @@ bot.catch((err) => {
 
 bot.launch();
 
-console.log("DIGI DOSTAVKA — FIXED CONFIRM + PHOTO UX RUNNING");
+console.log("DIGI DOSTAVKA — NO COURIER RESTRICTIONS RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
