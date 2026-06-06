@@ -1439,54 +1439,61 @@ bot.action("cancel", async (ctx: any) => {
 
 bot.action("confirm", async (ctx: any) => {
   const userId = ctx.from.id;
-  const draft = drafts.get(userId);
 
-  if (!draft) {
-    await ctx.answerCbQuery("Draft topilmadi");
-    await ctx.reply("❌ Draft topilmadi. Zayavkani boshidan yarating.");
-    return;
+  try {
+    const draft = drafts.get(userId);
+
+    if (!draft) {
+      await ctx.answerCbQuery("Draft topilmadi");
+      await ctx.reply("❌ Draft topilmadi. Zayavkani boshidan yarating.");
+      return;
+    }
+
+    const order: Order = {
+      id: "ORD-" + Date.now(),
+      type: (draft.type || "normal") as OrderType,
+      clientName: draft.clientName || "",
+      clientPhone: draft.clientPhone || "",
+      address: draft.address || "",
+      items: draft.items || [],
+      deliveryTime: draft.deliveryTime || "",
+      paymentType: (draft.paymentType || "paid") as PaymentType,
+      amount: draft.amount,
+      currency: draft.currency,
+      courierId: draft.courierId || 0,
+      courierName: draft.courierName || "",
+      managerName: getAdminName(userId),
+      status: draft.type === "storage" ? "scheduled" : "created",
+      scheduledAt: draft.scheduledAt,
+      createdBy: userId,
+      createdAt: new Date().toISOString(),
+      comment: draft.comment,
+      courierComment: draft.courierComment
+    };
+
+    const orders = await getOrders();
+
+    if (order.type === "normal") {
+      const msg = await bot.telegram.sendMessage(
+        DELIVERY_GROUP_ID,
+        formatOrder(order),
+        htmlOptions(deliveryButtons(order))
+      );
+
+      order.deliveryGroupMessageId = msg.message_id;
+    }
+
+    orders.push(order);
+    await saveOrders(orders);
+    drafts.delete(userId);
+
+    await ctx.answerCbQuery("✅ Tasdiqlandi");
+    await ctx.reply("✅ Zayavka saqlandi", adminMenu());
+  } catch (e: any) {
+    console.error("CONFIRM ERROR:", e);
+    await ctx.answerCbQuery("Xatolik");
+    await ctx.reply("❌ Zayavka yuborilmadi. Railway Logsda CONFIRM ERROR ni ko‘r.");
   }
-
-  const order: Order = {
-    id: "ORD-" + Date.now(),
-    type: (draft.type || "normal") as OrderType,
-    clientName: draft.clientName || "",
-    clientPhone: draft.clientPhone || "",
-    address: draft.address || "",
-    items: draft.items || [],
-    deliveryTime: draft.deliveryTime || "",
-    paymentType: (draft.paymentType || "paid") as PaymentType,
-    amount: draft.amount,
-    currency: draft.currency,
-    courierId: draft.courierId || 0,
-    courierName: draft.courierName || "",
-    managerName: getAdminName(userId),
-    status: draft.type === "storage" ? "scheduled" : "created",
-    scheduledAt: draft.scheduledAt,
-    createdBy: userId,
-    createdAt: new Date().toISOString(),
-    comment: draft.comment,
-    courierComment: draft.courierComment
-  };
-
-  const orders = await getOrders();
-
-  if (order.type === "normal") {
-    const msg = await bot.telegram.sendMessage(
-      DELIVERY_GROUP_ID,
-      formatOrder(order),
-      htmlOptions(deliveryButtons(order))
-    );
-
-    order.deliveryGroupMessageId = msg.message_id;
-  }
-
-  orders.push(order);
-  await saveOrders(orders);
-  drafts.delete(userId);
-
-  await ctx.answerCbQuery("✅ Tasdiqlandi");
-  await ctx.reply("✅ Zayavka saqlandi", adminMenu());
 });
 
 bot.action(/^assemble:(.+)$/, async (ctx: any) => {
@@ -1504,16 +1511,9 @@ bot.action(/^assemble:(.+)$/, async (ctx: any) => {
       return;
     }
 
-    if (!isAdmin(ctx.from.id)) {
-      if (order.courierId && order.courierId !== ctx.from.id) {
-        await ctx.answerCbQuery("Bu sizning zayavkangiz emas");
-        return;
-      }
-
-      if (!order.courierId && !isCourier(ctx.from.id)) {
-        await ctx.answerCbQuery("Ruxsat yo‘q");
-        return;
-      }
+    if (!isAdmin(ctx.from.id) && !isCourier(ctx.from.id)) {
+      await ctx.answerCbQuery("Ruxsat yo‘q");
+      return;
     }
 
     if (order.status !== "created") {
@@ -1656,7 +1656,7 @@ bot.catch((err) => {
 
 bot.launch();
 
-console.log("DIGI DOSTAVKA — COMMENT + DELIVERED MS FULL CODE RUNNING");
+console.log("DIGI DOSTAVKA — FIXED CONFIRM + PHOTO UX RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
