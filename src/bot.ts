@@ -741,7 +741,9 @@ async function finishDeliveryPhotoSession(ctx: any): Promise<void> {
         htmlOptions()
       );
 
+      console.log("DELETE TIMER STARTED", order.deliveryGroupMessageId);
       setTimeout(async () => {
+        console.log("DELETING MESSAGE", order.deliveryGroupMessageId);
         try {
           await bot.telegram.deleteMessage(DELIVERY_GROUP_ID, order.deliveryGroupMessageId!);
         } catch (e) {
