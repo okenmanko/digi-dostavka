@@ -549,7 +549,9 @@ async function finishDeliveryPhotoSession(ctx) {
         waitingPhoto.delete(ctx.from.id);
         if (order.deliveryGroupMessageId) {
             await bot.telegram.editMessageText(DELIVERY_GROUP_ID, order.deliveryGroupMessageId, undefined, formatOrder(order), htmlOptions());
+            console.log("DELETE TIMER STARTED", order.deliveryGroupMessageId);
             setTimeout(async () => {
+                console.log("DELETING MESSAGE", order.deliveryGroupMessageId);
                 try {
                     await bot.telegram.deleteMessage(DELIVERY_GROUP_ID, order.deliveryGroupMessageId);
                 }
@@ -1183,24 +1185,18 @@ bot.action(/^deliver:(.+)$/, async (ctx) => {
 });
 bot.on("photo", async (ctx) => {
     const session = deliveryPhotoSessions.get(ctx.from.id);
-    if (session) {
-        if (session.photos.length >= 10) {
-            return ctx.reply("10 ta rasm qabul qilindi. Endi ✅ Tayyor tugmasini bosing.", deliveryDoneKeyboard());
-        }
-        const photos = ctx.message.photo;
-        const photo = photos[photos.length - 1];
-        session.photos.push(photo.file_id);
-        deliveryPhotoSessions.set(ctx.from.id, session);
-        return ctx.reply(`✅ Rasm qabul qilindi (${session.photos.length}/10). Yana rasm yuboring yoki ✅ Tayyor bosing.`, deliveryDoneKeyboard());
-    }
-    const orderId = waitingPhoto.get(ctx.from.id);
-    if (!orderId)
+    if (!session)
         return;
-    deliveryPhotoSessions.set(ctx.from.id, {
-        orderId,
-        photos: []
-    });
-    return ctx.reply("Rasm qabul qilish sessiyasi ochildi. Rasmni qayta yuboring 📸", deliveryDoneKeyboard());
+    if (session.photos.length >= 10) {
+        return ctx.reply("10 ta rasm qabul qilindi. Endi ✅ Tayyor tugmasini bosing.", deliveryDoneKeyboard());
+    }
+    const photos = ctx.message.photo;
+    const photo = photos[photos.length - 1];
+    session.photos.push(photo.file_id);
+    deliveryPhotoSessions.set(ctx.from.id, session);
+    if (session.photos.length === 1) {
+        await ctx.reply("📸 Yetkazilgan mahsulot rasmlarini yuboring.\n\nBir nechta rasm yuborishingiz mumkin.\n\nTugatgach pastdagi ✅ Tayyor tugmasini bosing.", deliveryDoneKeyboard());
+    }
 });
 bot.action(/^cancel_real:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx.from.id)) {

@@ -1551,32 +1551,27 @@ bot.action(/^deliver:(.+)$/, async (ctx: any) => {
 bot.on("photo", async (ctx: any) => {
   const session = deliveryPhotoSessions.get(ctx.from.id);
 
-  if (session) {
-    if (session.photos.length >= 10) {
-      return ctx.reply("10 ta rasm qabul qilindi. Endi ✅ Tayyor tugmasini bosing.", deliveryDoneKeyboard());
-    }
+  if (!session) return;
 
-    const photos = ctx.message.photo;
-    const photo = photos[photos.length - 1];
-
-    session.photos.push(photo.file_id);
-    deliveryPhotoSessions.set(ctx.from.id, session);
-
+  if (session.photos.length >= 10) {
     return ctx.reply(
-      `✅ Rasm qabul qilindi (${session.photos.length}/10). Yana rasm yuboring yoki ✅ Tayyor bosing.`,
+      "10 ta rasm qabul qilindi. Endi ✅ Tayyor tugmasini bosing.",
       deliveryDoneKeyboard()
     );
   }
 
-  const orderId = waitingPhoto.get(ctx.from.id);
-  if (!orderId) return;
+  const photos = ctx.message.photo;
+  const photo = photos[photos.length - 1];
 
-  deliveryPhotoSessions.set(ctx.from.id, {
-    orderId,
-    photos: []
-  });
+  session.photos.push(photo.file_id);
+  deliveryPhotoSessions.set(ctx.from.id, session);
 
-  return ctx.reply("Rasm qabul qilish sessiyasi ochildi. Rasmni qayta yuboring 📸", deliveryDoneKeyboard());
+  if (session.photos.length === 1) {
+    await ctx.reply(
+      "📸 Yetkazilgan mahsulot rasmlarini yuboring.\n\nBir nechta rasm yuborishingiz mumkin.\n\nTugatgach pastdagi ✅ Tayyor tugmasini bosing.",
+      deliveryDoneKeyboard()
+    );
+  }
 });
 
 bot.action(/^cancel_real:(.+)$/, async (ctx: any) => {
