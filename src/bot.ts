@@ -840,6 +840,34 @@ function parseMoney(value: string): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+function detectPaymentFromExcel(sheet: XLSX.WorkSheet): { amount?: number; currency?: Currency } {
+  const row8Values: string[] = [];
+
+  for (const col of ["G", "H", "I", "J", "K", "L"]) {
+    const value = excelCell(sheet, `${col}8`);
+    if (value) row8Values.push(value);
+  }
+
+  const row8Text = row8Values.join(" ").trim();
+
+  if (!row8Text) {
+    return {};
+  }
+
+  const afterLabel = afterColon(row8Text);
+  const amount = parseMoney(afterLabel) || parseMoney(row8Text);
+
+  if (!amount) {
+    return {};
+  }
+
+  // 4 xonali songacha: USD. 6 xonali va undan katta: UZS.
+  // 5 xonali kam uchraydi, xavfsiz default sifatida USD qoldiramiz.
+  const currency: Currency = amount >= 100000 ? "UZS" : "USD";
+
+  return { amount, currency };
+}
+
 function findFirstNonEmpty(sheet: XLSX.WorkSheet, addresses: string[]): string {
   for (const address of addresses) {
     const value = excelCell(sheet, address);
@@ -903,13 +931,7 @@ function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
     });
   }
 
-  const total =
-    parseMoney(excelCell(sheet, "K15")) ||
-    parseMoney(excelCell(sheet, "K14")) ||
-    parseMoney(excelCell(sheet, "J15")) ||
-    parseMoney(excelCell(sheet, "J14")) ||
-    parseMoney(excelCell(sheet, "I15")) ||
-    parseMoney(excelCell(sheet, "I14"));
+  const payment = detectPaymentFromExcel(sheet);
 
   return {
     id: "XLS-" + Date.now(),
@@ -924,9 +946,9 @@ function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
       quantity: 1
     }],
     deliveryTime: "-",
-    paymentType: total ? "cash" : "paid",
-    amount: total,
-    currency: total ? EXCEL_DEFAULT_CURRENCY : undefined,
+    paymentType: payment.amount ? "cash" : "paid",
+    amount: payment.amount,
+    currency: payment.currency,
     courierId: 0,
     courierName: "",
     managerName,
