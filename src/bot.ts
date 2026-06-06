@@ -125,6 +125,7 @@ const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
 
 const drafts = new Map<number, Draft>();
 const waitingPhoto = new Map<number, string>();
+const deliveryPhotoSessions = new Map<number, DeliveryPhotoSession>();
 const waitingComment = new Map<number, string>();
 const locks = new Set<string>();
 let moyskladSyncRunning = false;
