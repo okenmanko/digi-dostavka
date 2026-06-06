@@ -1439,24 +1439,13 @@ bot.action("cancel", async (ctx: any) => {
 
 bot.action("confirm", async (ctx: any) => {
   const userId = ctx.from.id;
-
-  console.log("CONFIRM CLICKED BY:", userId);
-
-  if (!isAdmin(userId)) {
-    await ctx.answerCbQuery("Siz admin emassiz");
-    return;
-  }
-
   const draft = drafts.get(userId);
 
   if (!draft) {
-    console.log("DRAFT NOT FOUND FOR:", userId);
     await ctx.answerCbQuery("Draft topilmadi");
     await ctx.reply("❌ Draft topilmadi. Zayavkani boshidan yarating.");
     return;
   }
-
-  console.log("DRAFT FOUND:", draft);
 
   const order: Order = {
     id: "ORD-" + Date.now(),
