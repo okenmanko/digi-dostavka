@@ -2,6 +2,7 @@ import { Telegraf, Markup } from "telegraf";
 import dotenv from "dotenv";
 import fs from "fs/promises";
 import path from "path";
+import * as XLSX from "xlsx";
 
 dotenv.config();
 
@@ -122,6 +123,10 @@ const MOYSKLAD_SYNC_INTERVAL_SECONDS = Number(process.env.MOYSKLAD_SYNC_INTERVAL
 const DATA_DIR = path.join(process.cwd(), "data");
 const ORDERS_FILE = path.join(DATA_DIR, "orders.json");
 const WAREHOUSES_FILE = path.join(DATA_DIR, "warehouses.json");
+
+const EXCEL_DEFAULT_WAREHOUSE_NAME = process.env.EXCEL_DEFAULT_WAREHOUSE_NAME || "25/24";
+const EXCEL_DEFAULT_CURRENCY = (process.env.EXCEL_DEFAULT_CURRENCY || "USD") as Currency;
+
 
 const drafts = new Map<number, Draft>();
 const waitingPhoto = new Map<number, string>();
@@ -786,6 +791,191 @@ async function finishDeliveryPhotoSession(ctx: any): Promise<void> {
   }
 }
 
+
+/* =========================
+   EXCEL DELIVERY IMPORT
+========================= */
+
+function excelCell(sheet: XLSX.WorkSheet, address: string): string {
+  const cell = sheet[address];
+  if (!cell || cell.v === undefined || cell.v === null) return "";
+  return String(cell.v).trim();
+}
+
+function afterColon(value: string): string {
+  const text = String(value || "").trim();
+  const idx = text.indexOf(":");
+  if (idx === -1) return text;
+  return text.slice(idx + 1).trim();
+}
+
+function extractPhone(text: string): string {
+  const match = String(text || "").match(/(?:\+?998)?[\s\-()]*\d[\d\s\-()]{6,}\d/g);
+  if (!match?.length) return "";
+  return match[0].replace(/[^\d+]/g, "");
+}
+
+function stripPhoneFromName(text: string): string {
+  return String(text || "")
+    .replace(/(?:\+?998)?[\s\-()]*\d[\d\s\-()]{6,}\d/g, "")
+    .replace(/[:;]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseQty(value: string): number {
+  const text = String(value || "").replace(",", ".");
+  const match = text.match(/\d+(\.\d+)?/);
+  if (!match) return 1;
+  const n = Number(match[0]);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+function parseMoney(value: string): number | undefined {
+  const text = String(value || "")
+    .replace(/\s/g, "")
+    .replace(",", ".")
+    .replace(/[^\d.]/g, "");
+  const n = Number(text);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function findFirstNonEmpty(sheet: XLSX.WorkSheet, addresses: string[]): string {
+  for (const address of addresses) {
+    const value = excelCell(sheet, address);
+    if (value) return value;
+  }
+  return "";
+}
+
+function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+
+  let clientRaw = afterColon(findFirstNonEmpty(sheet, ["G5", "F5", "H5"]));
+  const addressRaw = afterColon(findFirstNonEmpty(sheet, ["G6", "F6", "H6"]));
+  let phoneRaw = afterColon(findFirstNonEmpty(sheet, ["G7", "F7", "H7"]));
+
+  const phoneFromClient = extractPhone(clientRaw);
+  if (!phoneRaw && phoneFromClient) phoneRaw = phoneFromClient;
+
+  const clientName = stripPhoneFromName(clientRaw) || clientRaw || "-";
+  const clientPhone = extractPhone(phoneRaw) || phoneRaw || "-";
+  const address = addressRaw || "-";
+
+  const managerRaw = afterColon(findFirstNonEmpty(sheet, ["A7", "B7", "C7"]));
+  const managerName = managerRaw || getAdminName(createdBy);
+
+  const items: OrderItem[] = [];
+
+  for (let row = 14; row <= 60; row++) {
+    const productNameRaw =
+      excelCell(sheet, `B${row}`) ||
+      excelCell(sheet, `C${row}`) ||
+      excelCell(sheet, `D${row}`);
+
+    const productName = String(productNameRaw || "").trim();
+
+    if (!productName) continue;
+
+    const lower = productName.toLowerCase();
+    if (
+      lower.includes("жами") ||
+      lower.includes("jami") ||
+      lower.includes("итого") ||
+      lower.includes("имзо") ||
+      lower.includes("подп")
+    ) {
+      break;
+    }
+
+    const qtyRaw =
+      excelCell(sheet, `G${row}`) ||
+      excelCell(sheet, `F${row}`) ||
+      excelCell(sheet, `H${row}`);
+
+    items.push({
+      name: productName.toUpperCase(),
+      warehouseId: "",
+      warehouseName: EXCEL_DEFAULT_WAREHOUSE_NAME,
+      quantity: parseQty(qtyRaw)
+    });
+  }
+
+  const total =
+    parseMoney(excelCell(sheet, "K15")) ||
+    parseMoney(excelCell(sheet, "K14")) ||
+    parseMoney(excelCell(sheet, "J15")) ||
+    parseMoney(excelCell(sheet, "J14")) ||
+    parseMoney(excelCell(sheet, "I15")) ||
+    parseMoney(excelCell(sheet, "I14"));
+
+  return {
+    id: "XLS-" + Date.now(),
+    type: "normal",
+    clientName,
+    clientPhone,
+    address,
+    items: items.length ? items : [{
+      name: "EXCELDAN MAHSULOT TOPILMADI",
+      warehouseId: "",
+      warehouseName: EXCEL_DEFAULT_WAREHOUSE_NAME,
+      quantity: 1
+    }],
+    deliveryTime: "-",
+    paymentType: total ? "cash" : "paid",
+    amount: total,
+    currency: total ? EXCEL_DEFAULT_CURRENCY : undefined,
+    courierId: 0,
+    courierName: "",
+    managerName,
+    status: "created",
+    createdBy,
+    createdAt: new Date().toISOString(),
+    comment: "Excel orqali yaratildi"
+  };
+}
+
+async function handleExcelDocument(ctx: any): Promise<void> {
+  const document = ctx.message?.document;
+
+  if (!document) return;
+
+  const fileName = String(document.file_name || "").toLowerCase();
+
+  if (!fileName.endsWith(".xlsx") && !fileName.endsWith(".xls")) {
+    return;
+  }
+
+  try {
+    await ctx.reply("📄 Excel qabul qilindi. Zayavka yaratilmoqda...");
+
+    const fileLink = await ctx.telegram.getFileLink(document.file_id);
+    const response = await fetch(fileLink.href);
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const order = parseExcelOrder(buffer, ctx.from.id);
+    const orders = await getOrders();
+
+    const msg = await bot.telegram.sendMessage(
+      DELIVERY_GROUP_ID,
+      formatOrder(order),
+      htmlOptions(deliveryButtons(order))
+    );
+
+    order.deliveryGroupMessageId = msg.message_id;
+    orders.push(order);
+    await saveOrders(orders);
+
+    await ctx.reply("✅ Excel o‘qildi va zayavka delivery gruppaga yuborildi.");
+  } catch (e: any) {
+    console.error("EXCEL IMPORT ERROR:", e);
+    await ctx.reply("❌ Excel o‘qishda xatolik. Railway Logsda EXCEL IMPORT ERROR ni tekshir.");
+  }
+}
+
 /* =========================
    BOT HANDLERS
 ========================= */
@@ -814,6 +1004,11 @@ bot.start(async (ctx: any) => {
 bot.command("id", async (ctx: any) => {
   await ctx.reply("🆔 User ID: " + ctx.from.id + "\n💬 Chat ID: " + ctx.chat.id);
 });
+
+bot.on("document", async (ctx: any) => {
+  await handleExcelDocument(ctx);
+});
+
 
 bot.command("deliver", async (ctx: any) => {
   const text = ctx.message?.text || "";
@@ -1641,7 +1836,7 @@ bot.catch((err) => {
 
 bot.launch();
 
-console.log("DIGI DOSTAVKA — NO COURIER RESTRICTIONS RUNNING");
+console.log("DIGI DOSTAVKA — EXCEL IMPORT RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
