@@ -194,7 +194,7 @@ function formatItems(items = []) {
         const sklad = item.warehouseName || "-";
         if (!groups.has(sklad))
             groups.set(sklad, []);
-        const unit = (item.unit || "X").toUpperCase();
+        const unit = String(item.unit || "X").toUpperCase();
         const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}${unit}` : "";
         const name = String(item.name || "").toUpperCase();
         groups.get(sklad).push(`<b>${index}) ${escapeHtml(name + qtyText)}</b>`);
@@ -669,8 +669,16 @@ function parseQty(value) {
 function parseQtyWithUnit(value) {
     const text = String(value || "").trim();
     const quantity = parseQty(text);
-    const unitMatch = text.match(/[A-Za-zА-Яа-яЁё]+/);
-    const unit = unitMatch ? unitMatch[0].toUpperCase() : "X";
+    // Excelda "1 C", "1 c", "1 V", "1 v" bo‘lsa, zayavkada ham 1C / 1V chiqadi.
+    // Kirill С/с va В/в ham ushlanadi.
+    const compact = text.replace(/\s+/g, "").toUpperCase();
+    let unit = "X";
+    if (/[CС]$/.test(compact) || compact.includes("C") || compact.includes("С")) {
+        unit = "C";
+    }
+    else if (/[VВ]$/.test(compact) || compact.includes("V") || compact.includes("В")) {
+        unit = "V";
+    }
     return { quantity, unit };
 }
 function parseMoney(value) {
