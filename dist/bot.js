@@ -189,15 +189,19 @@ function formatItems(items = []) {
     if (!items.length)
         return "Mahsulot yo‘q";
     const groups = new Map();
+    let index = 1;
     for (const item of items) {
         const sklad = item.warehouseName || "-";
         if (!groups.has(sklad))
             groups.set(sklad, []);
-        const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}X` : "";
-        groups.get(sklad).push(`<b>${escapeHtml(item.name.toUpperCase() + qtyText)}</b>`);
+        const unit = (item.unit || "X").toUpperCase();
+        const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}${unit}` : "";
+        const name = String(item.name || "").toUpperCase();
+        groups.get(sklad).push(`<b>${index}) ${escapeHtml(name + qtyText)}</b>`);
+        index++;
     }
     return Array.from(groups.entries())
-        .map(([sklad, names]) => `${names.join("\n")}\n\n Sklad: ${escapeHtml(sklad)}`)
+        .map(([sklad, names]) => `${names.join("\n\n")}\n\n Sklad: ${escapeHtml(sklad)}`)
         .join("\n\n");
 }
 function formatOrder(order) {
@@ -224,7 +228,7 @@ function formatOrder(order) {
     }
     if (order.comment) {
         lines.push("");
-        lines.push("📝 Kommentariya:");
+        lines.push("📝 KOMMENTARIYA:");
         lines.push(escapeHtml(order.comment));
     }
     if (order.courierComment) {
@@ -662,6 +666,13 @@ function parseQty(value) {
     const n = Number(match[0]);
     return Number.isFinite(n) && n > 0 ? n : 1;
 }
+function parseQtyWithUnit(value) {
+    const text = String(value || "").trim();
+    const quantity = parseQty(text);
+    const unitMatch = text.match(/[A-Za-zА-Яа-яЁё]+/);
+    const unit = unitMatch ? unitMatch[0].toUpperCase() : "X";
+    return { quantity, unit };
+}
 function parseMoney(value) {
     const text = String(value || "")
         .replace(/\s/g, "")
@@ -699,6 +710,22 @@ function findFirstNonEmpty(sheet, addresses) {
     }
     return "";
 }
+function getExcelComment(sheet) {
+    const values = [
+        excelCell(sheet, "A10"),
+        excelCell(sheet, "B10"),
+        excelCell(sheet, "C10"),
+        excelCell(sheet, "G10"),
+        excelCell(sheet, "H10")
+    ]
+        .map((x) => String(x || "").trim())
+        .filter(Boolean);
+    const cleaned = values
+        .filter((x) => !/^ком+ент/i.test(x) && !/^comment/i.test(x))
+        .join("\n")
+        .trim();
+    return cleaned || "Excel orqali yaratildi";
+}
 function parseExcelOrder(buffer, createdBy) {
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
@@ -733,11 +760,13 @@ function parseExcelOrder(buffer, createdBy) {
         const qtyRaw = excelCell(sheet, `G${row}`) ||
             excelCell(sheet, `F${row}`) ||
             excelCell(sheet, `H${row}`);
+        const parsedQty = parseQtyWithUnit(qtyRaw);
         items.push({
             name: productName.toUpperCase(),
             warehouseId: "",
             warehouseName: EXCEL_DEFAULT_WAREHOUSE_NAME,
-            quantity: parseQty(qtyRaw)
+            quantity: parsedQty.quantity,
+            unit: parsedQty.unit
         });
     }
     const payment = detectPaymentFromExcel(sheet);
@@ -751,7 +780,8 @@ function parseExcelOrder(buffer, createdBy) {
                 name: "EXCELDAN MAHSULOT TOPILMADI",
                 warehouseId: "",
                 warehouseName: EXCEL_DEFAULT_WAREHOUSE_NAME,
-                quantity: 1
+                quantity: 1,
+                unit: "X"
             }],
         deliveryTime: "-",
         paymentType: payment.amount ? "cash" : "paid",
@@ -763,7 +793,7 @@ function parseExcelOrder(buffer, createdBy) {
         status: "created",
         createdBy,
         createdAt: new Date().toISOString(),
-        comment: "Excel orqali yaratildi"
+        comment: getExcelComment(sheet)
     };
 }
 async function handleExcelDocument(ctx) {
@@ -1454,7 +1484,7 @@ bot.catch((err) => {
     console.error("BOT ERROR:", err);
 });
 bot.launch();
-console.log("DIGI DOSTAVKA — EXCEL IMPORT RUNNING");
+console.log("DIGI DOSTAVKA — EXCEL ITEM FORMAT UPDATE RUNNING");
 process.once("SIGINT", () => {
     bot.stop("SIGINT");
 });

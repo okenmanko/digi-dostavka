@@ -31,6 +31,7 @@ type OrderItem = {
   warehouseId: string;
   warehouseName: string;
   quantity?: number;
+  unit?: string;
 };
 
 type Order = {
@@ -245,17 +246,22 @@ function formatItems(items: OrderItem[] = []): string {
   if (!items.length) return "Mahsulot yo‘q";
 
   const groups = new Map<string, string[]>();
+  let index = 1;
 
   for (const item of items) {
     const sklad = item.warehouseName || "-";
     if (!groups.has(sklad)) groups.set(sklad, []);
 
-    const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}X` : "";
-    groups.get(sklad)!.push(`<b>${escapeHtml(item.name.toUpperCase() + qtyText)}</b>`);
+    const unit = (item.unit || "X").toUpperCase();
+    const qtyText = item.quantity && item.quantity > 0 ? ` - ${item.quantity}${unit}` : "";
+    const name = String(item.name || "").toUpperCase();
+
+    groups.get(sklad)!.push(`<b>${index}) ${escapeHtml(name + qtyText)}</b>`);
+    index++;
   }
 
   return Array.from(groups.entries())
-    .map(([sklad, names]) => `${names.join("\n")}\n\n Sklad: ${escapeHtml(sklad)}`)
+    .map(([sklad, names]) => `${names.join("\n\n")}\n\n Sklad: ${escapeHtml(sklad)}`)
     .join("\n\n");
 }
 
@@ -285,7 +291,7 @@ function formatOrder(order: Partial<Order>): string {
 
   if (order.comment) {
     lines.push("");
-    lines.push("📝 Kommentariya:");
+    lines.push("📝 KOMMENTARIYA:");
     lines.push(escapeHtml(order.comment));
   }
 
@@ -831,6 +837,15 @@ function parseQty(value: string): number {
   return Number.isFinite(n) && n > 0 ? n : 1;
 }
 
+function parseQtyWithUnit(value: string): { quantity: number; unit: string } {
+  const text = String(value || "").trim();
+  const quantity = parseQty(text);
+  const unitMatch = text.match(/[A-Za-zА-Яа-яЁё]+/);
+  const unit = unitMatch ? unitMatch[0].toUpperCase() : "X";
+
+  return { quantity, unit };
+}
+
 function parseMoney(value: string): number | undefined {
   const text = String(value || "")
     .replace(/\s/g, "")
@@ -874,6 +889,25 @@ function findFirstNonEmpty(sheet: XLSX.WorkSheet, addresses: string[]): string {
     if (value) return value;
   }
   return "";
+}
+
+function getExcelComment(sheet: XLSX.WorkSheet): string {
+  const values = [
+    excelCell(sheet, "A10"),
+    excelCell(sheet, "B10"),
+    excelCell(sheet, "C10"),
+    excelCell(sheet, "G10"),
+    excelCell(sheet, "H10")
+  ]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+
+  const cleaned = values
+    .filter((x) => !/^ком+ент/i.test(x) && !/^comment/i.test(x))
+    .join("\n")
+    .trim();
+
+  return cleaned || "Excel orqali yaratildi";
 }
 
 function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
@@ -923,11 +957,14 @@ function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
       excelCell(sheet, `F${row}`) ||
       excelCell(sheet, `H${row}`);
 
+    const parsedQty = parseQtyWithUnit(qtyRaw);
+
     items.push({
       name: productName.toUpperCase(),
       warehouseId: "",
       warehouseName: EXCEL_DEFAULT_WAREHOUSE_NAME,
-      quantity: parseQty(qtyRaw)
+      quantity: parsedQty.quantity,
+      unit: parsedQty.unit
     });
   }
 
@@ -943,7 +980,8 @@ function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
       name: "EXCELDAN MAHSULOT TOPILMADI",
       warehouseId: "",
       warehouseName: EXCEL_DEFAULT_WAREHOUSE_NAME,
-      quantity: 1
+      quantity: 1,
+      unit: "X"
     }],
     deliveryTime: "-",
     paymentType: payment.amount ? "cash" : "paid",
@@ -955,7 +993,7 @@ function parseExcelOrder(buffer: Buffer, createdBy: number): Order {
     status: "created",
     createdBy,
     createdAt: new Date().toISOString(),
-    comment: "Excel orqali yaratildi"
+    comment: getExcelComment(sheet)
   };
 }
 
@@ -1858,7 +1896,7 @@ bot.catch((err) => {
 
 bot.launch();
 
-console.log("DIGI DOSTAVKA — EXCEL IMPORT RUNNING");
+console.log("DIGI DOSTAVKA — EXCEL ITEM FORMAT UPDATE RUNNING");
 
 process.once("SIGINT", () => {
   bot.stop("SIGINT");
